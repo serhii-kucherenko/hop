@@ -1,0 +1,19 @@
+{
+  "local": {
+    "machine_name": "macbook-pro",
+    "role": "server",
+    "control_bind": "0.0.0.0:4600",
+    "data_bind": "0.0.0.0:4601",
+    "shared_secret": "replace-with-strong-passphrase",
+    "screen_width": 1728,
+    "screen_height": 1117
+  },
+  "peers": [
+    {
+      "machine_name": "windows-desktop",
+      "control_addr": "192.168.1.52:4600",
+      "data_addr": "192.168.1.52:4601",
+      "position": "right"
+    }
+  ]
+}

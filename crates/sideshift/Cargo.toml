@@ -1,0 +1,13 @@
+[package]
+name = "sideshift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+sideshift-core = { path = "../sideshift-core" }
+sideshift-protocol = { path = "../sideshift-protocol" }
