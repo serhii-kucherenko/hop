@@ -1,0 +1,23 @@
+[package]
+name = "sideshift-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+clap.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+sideshift-protocol = { path = "../sideshift-protocol" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_UI_WindowsAndMessaging"] }
