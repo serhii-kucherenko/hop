@@ -48,11 +48,46 @@ This MVP uses:
 - **UDP datagrams** for low-latency input events
 - **Pre-shared secret authentication + session key derivation (HKDF)**
 - **ChaCha20-Poly1305 authenticated encryption** for both control frames and input datagrams
+- **One handshake per session, then sealed datagrams** (no per-event crypto round-trip)
 
 Rationale:
 - control events need ordered/reliable delivery
-- mouse/keyboard deltas benefit from low-latency datagrams
+- mouse/keyboard deltas must stay on a non-blocking datagram path, not a clipboard/file stream
+- hot-path frames are intentionally tiny (relative pointer deltas + button/key codes)
 - transport and platform layers stay separable for future QUIC migration
+
+## Latency target and expectations
+
+SideShift is designed around a latency-first goal:
+- **Wired same-LAN target:** end-to-end input handoff p99 under ~10ms
+- **Stretch target:** under ~5ms on clean, low-jitter links
+
+Reality check for Wi-Fi:
+- modern 5GHz/6GHz Wi-Fi can feel good, but contention, power saving, and interference can add jitter spikes
+- expect higher p99 tail latency than wired Ethernet, especially in busy RF environments
+
+### What dominates latency
+
+Most delay comes from three buckets:
+1. **Capture time** on the server OS (event tap/hook behavior and scheduling)
+2. **Network transit** (LAN RTT + jitter, queueing, AP behavior on Wi-Fi)
+3. **Injection time** on the client OS (native input API + scheduler timing)
+
+Crypto overhead is usually small relative to those three once the session key is established.
+
+### How to test quickly
+
+1. **Loopback sanity:** run server+client on one machine to validate software path and logs
+2. **Two-machine LAN check:** verify ping stability between machines (`ping` baseline)
+3. **Subjective edge-flick test:** rapidly flick to the configured handoff edge and type immediately on the other machine
+
+Optional runtime hook:
+- run client with `--log-latency` to print a simple one-way estimate (clock-sync dependent)
+- command `sideshift bench` is reserved as a future active benchmark hook
+
+Compared with Logi Flow-style Bluetooth switching, SideShift avoids Bluetooth re-pair handoff delays by keeping ownership fixed on the server and forwarding events over LAN.
+
+See [LATENCY.md](LATENCY.md) for a short checklist-focused version.
 
 ## What this MVP does not do
 
@@ -95,6 +130,12 @@ The CLI prints:
 - connection/authentication status
 - handoff transitions
 - injected input events on mock/dev paths
+
+Latency hook example:
+
+```bash
+cargo run -p sideshift -- run --config sideshift.json --role client --log-latency
+```
 
 ## macOS + Windows setup path
 
@@ -147,6 +188,7 @@ cargo test --workspace
 ### Linux CI note
 
 Linux uses mock platform adapters so protocol/layout/state behavior remains testable in CI even without native desktop APIs.
+This includes latency-sensitive framing/state logic, while native capture/inject latency still requires macOS/Windows hardware validation.
 
 ## Comparison: SideShift vs Deskflow vs Logi Flow
 

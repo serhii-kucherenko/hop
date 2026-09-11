@@ -20,11 +20,15 @@ use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{ScreenSize, SpatialLayout, SpatialNeighbor};
 use crate::platform::build_platform_adapters;
 
-pub async fn run(config: Config, role_override: Option<NodeRole>) -> anyhow::Result<()> {
+pub async fn run(
+    config: Config,
+    role_override: Option<NodeRole>,
+    log_latency: bool,
+) -> anyhow::Result<()> {
     let role = role_override.unwrap_or(config.local.role);
     match role {
         NodeRole::Server => run_server(config).await,
-        NodeRole::Client => run_client(config).await,
+        NodeRole::Client => run_client(config, log_latency).await,
     }
 }
 
@@ -95,7 +99,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("invalid peer data_addr {}", peer.data_addr))?;
 
     let mut handoff = HandoffController::new(config.local.machine_name.clone());
-    let mut ticker = tokio::time::interval(Duration::from_millis(25));
+    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
@@ -128,9 +132,8 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         if matches!(handoff.focus_state(), FocusState::Remote { .. }) {
             for event in adapters.input_capture.poll_input_events()? {
                 let datagram = InputDatagram {
-                    source_machine: config.local.machine_name.clone(),
                     event,
-                    sent_at_millis: now_millis(),
+                    sent_at_micros: now_micros(),
                 };
                 let packet = encode_datagram(&mut cipher, &datagram)?;
                 udp_socket.send_to(&packet, peer_data_addr).await?;
@@ -139,7 +142,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     }
 }
 
-async fn run_client(config: Config) -> anyhow::Result<()> {
+async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
     println!(
@@ -187,6 +190,9 @@ async fn run_client(config: Config) -> anyhow::Result<()> {
                 }
                 let payload = &datagram_buffer[..len];
                 if let Ok(message) = decode_datagram(&mut cipher, payload) {
+                    if log_latency {
+                        log_one_way_latency(message.sent_at_micros);
+                    }
                     adapters.input_injector.inject_event(&message.event)?;
                 }
             }
@@ -282,9 +288,22 @@ fn find_peer_for_client(config: &Config, client_ip: String) -> Option<PeerConfig
         .cloned()
 }
 
-fn now_millis() -> u64 {
+fn now_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
+        .map(|duration| duration.as_micros() as u64)
         .unwrap_or(0)
+}
+
+fn log_one_way_latency(sent_at_micros: u64) {
+    let now = now_micros();
+    if now < sent_at_micros {
+        return;
+    }
+    let one_way_micros = now - sent_at_micros;
+    let one_way_ms = one_way_micros as f64 / 1000.0;
+    println!(
+        "latency estimate: one-way {:.3}ms (clock-sync dependent)",
+        one_way_ms
+    );
 }

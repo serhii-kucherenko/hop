@@ -25,7 +25,12 @@ enum Commands {
         /// Override role from the config.
         #[arg(long)]
         role: Option<RoleArg>,
+        /// Print one-way latency estimates at the client side.
+        #[arg(long, default_value_t = false)]
+        log_latency: bool,
     },
+    /// Reserved command for future network latency benchmarks.
+    Bench,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -39,13 +44,20 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { config, role } => {
+        Commands::Run {
+            config,
+            role,
+            log_latency,
+        } => {
             let config = Config::from_json_path(&config)?;
             let override_role = role.map(|role| match role {
                 RoleArg::Server => NodeRole::Server,
                 RoleArg::Client => NodeRole::Client,
             });
-            daemon::run(config, override_role).await?;
+            daemon::run(config, override_role, log_latency).await?;
+        }
+        Commands::Bench => {
+            println!("bench hook: reserved for future active RTT/one-way latency probes");
         }
     }
 

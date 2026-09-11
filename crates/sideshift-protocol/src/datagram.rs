@@ -11,17 +11,16 @@ pub enum MouseButton {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputEvent {
-    MouseMove { dx: i32, dy: i32 },
+    MouseMove { dx: i16, dy: i16 },
     MouseButton { button: MouseButton, pressed: bool },
-    Key { scancode: u32, pressed: bool },
-    Scroll { dx: i32, dy: i32 },
+    Key { scancode: u16, pressed: bool },
+    Scroll { dx: i16, dy: i16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputDatagram {
-    pub source_machine: String,
     pub event: InputEvent,
-    pub sent_at_millis: u64,
+    pub sent_at_micros: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
