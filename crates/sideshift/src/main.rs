@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
             daemon::run(config, override_role, log_latency).await?;
         }
         Commands::Bench => {
-            println!("bench hook: reserved for future active RTT/one-way latency probes");
+            println!("bench hook: reserved for future probes against 1-3ms goal and 5ms hard max");
         }
     }
 

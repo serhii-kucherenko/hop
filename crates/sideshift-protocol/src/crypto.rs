@@ -1,6 +1,5 @@
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use serde::{Deserialize, Serialize};
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelKind {
@@ -8,16 +7,8 @@ pub enum ChannelKind {
     Datagram = 0x4447_524d, // DGRM
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EncryptedPacket {
-    pub seq: u64,
-    pub ciphertext: Vec<u8>,
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum CryptoError {
-    #[error("failed to serialize encrypted packet")]
-    PacketEncoding,
     #[error("failed to decode encrypted packet")]
     PacketDecoding,
     #[error("packet replay or out-of-order frame rejected")]
@@ -53,19 +44,17 @@ impl CipherState {
             .expect("sequence number overflow");
         let nonce = build_nonce(channel, seq);
         let aad = (channel as u32).to_be_bytes();
-        let ciphertext = self
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| CryptoError::EncryptFailed)?;
 
-        let packet = EncryptedPacket { seq, ciphertext };
-        bincode::serialize(&packet).map_err(|_| CryptoError::PacketEncoding)
+        let mut packet = Vec::with_capacity(8 + plaintext.len() + 16);
+        packet.extend_from_slice(&seq.to_be_bytes());
+        packet.extend_from_slice(plaintext);
+
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(&nonce, &aad, &mut packet[8..])
+            .map_err(|_| CryptoError::EncryptFailed)?;
+        packet.extend_from_slice(tag.as_slice());
+        Ok(packet)
     }
 
     pub fn open(
@@ -73,24 +62,30 @@ impl CipherState {
         channel: ChannelKind,
         packet_bytes: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let packet: EncryptedPacket =
-            bincode::deserialize(packet_bytes).map_err(|_| CryptoError::PacketDecoding)?;
-        if packet.seq < self.min_recv_seq {
+        if packet_bytes.len() < 24 {
+            return Err(CryptoError::PacketDecoding);
+        }
+
+        let seq_bytes: [u8; 8] = packet_bytes[..8]
+            .try_into()
+            .map_err(|_| CryptoError::PacketDecoding)?;
+        let seq = u64::from_be_bytes(seq_bytes);
+        if seq < self.min_recv_seq {
             return Err(CryptoError::ReplayDetected);
         }
-        self.min_recv_seq = packet.seq.saturating_add(1);
 
-        let nonce = build_nonce(channel, packet.seq);
+        let encrypted_payload_end = packet_bytes.len() - 16;
+        let mut payload = packet_bytes[8..encrypted_payload_end].to_vec();
+        let tag = Tag::from_slice(&packet_bytes[encrypted_payload_end..]);
+
+        let nonce = build_nonce(channel, seq);
         let aad = (channel as u32).to_be_bytes();
         self.cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: packet.ciphertext.as_slice(),
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| CryptoError::DecryptFailed)
+            .decrypt_in_place_detached(&nonce, &aad, &mut payload, tag)
+            .map_err(|_| CryptoError::DecryptFailed)?;
+
+        self.min_recv_seq = seq.saturating_add(1);
+        Ok(payload)
     }
 }
 

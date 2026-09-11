@@ -59,12 +59,12 @@ Rationale:
 ## Latency target and expectations
 
 SideShift is designed around a latency-first goal:
-- **Wired same-LAN target:** end-to-end input handoff p99 under ~10ms
-- **Stretch target:** under ~5ms on clean, low-jitter links
+- **Wired same-LAN target:** end-to-end input latency in the **1–3ms** range
+- **Hard max target:** **5ms** on a quiet gigabit LAN
 
-Reality check for Wi-Fi:
+Reality check for Wi-Fi (best-effort only):
 - modern 5GHz/6GHz Wi-Fi can feel good, but contention, power saving, and interference can add jitter spikes
-- expect higher p99 tail latency than wired Ethernet, especially in busy RF environments
+- Wi-Fi can miss the 5ms hard max, especially in busy RF environments
 
 ### What dominates latency
 
@@ -74,6 +74,7 @@ Most delay comes from three buckets:
 3. **Injection time** on the client OS (native input API + scheduler timing)
 
 Crypto overhead is usually small relative to those three once the session key is established.
+The hot path is built to avoid additional round-trips and avoid unnecessary per-event logging.
 
 ### How to test quickly
 
@@ -82,8 +83,8 @@ Crypto overhead is usually small relative to those three once the session key is
 3. **Subjective edge-flick test:** rapidly flick to the configured handoff edge and type immediately on the other machine
 
 Optional runtime hook:
-- run client with `--log-latency` to print a simple one-way estimate (clock-sync dependent)
-- command `sideshift bench` is reserved as a future active benchmark hook
+- run client with `--log-latency` to print a rolling one-way estimate window (clock-sync dependent)
+- command `sideshift bench` is reserved as a future active benchmark hook against the 1–3ms goal / 5ms hard max
 
 Compared with Logi Flow-style Bluetooth switching, SideShift avoids Bluetooth re-pair handoff delays by keeping ownership fixed on the server and forwarding events over LAN.
 

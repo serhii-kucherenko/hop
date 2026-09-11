@@ -174,6 +174,7 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     println!("awaiting encrypted input datagrams...");
 
     let mut datagram_buffer = vec![0_u8; 4096];
+    let mut latency_tracker = LatencyTracker::new(log_latency);
     loop {
         tokio::select! {
             result = recv_control_message(&mut stream, &mut cipher) => {
@@ -190,9 +191,7 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
                 }
                 let payload = &datagram_buffer[..len];
                 if let Ok(message) = decode_datagram(&mut cipher, payload) {
-                    if log_latency {
-                        log_one_way_latency(message.sent_at_micros);
-                    }
+                    latency_tracker.observe(message.sent_at_micros);
                     adapters.input_injector.inject_event(&message.event)?;
                 }
             }
@@ -295,15 +294,69 @@ fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
-fn log_one_way_latency(sent_at_micros: u64) {
-    let now = now_micros();
-    if now < sent_at_micros {
-        return;
+struct LatencyTracker {
+    enabled: bool,
+    next_report_at_micros: u64,
+    samples: u64,
+    over_hard_max_samples: u64,
+    total_micros: u128,
+    max_micros: u64,
+}
+
+impl LatencyTracker {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            next_report_at_micros: now_micros().saturating_add(1_000_000),
+            samples: 0,
+            over_hard_max_samples: 0,
+            total_micros: 0,
+            max_micros: 0,
+        }
     }
-    let one_way_micros = now - sent_at_micros;
-    let one_way_ms = one_way_micros as f64 / 1000.0;
-    println!(
-        "latency estimate: one-way {:.3}ms (clock-sync dependent)",
-        one_way_ms
-    );
+
+    fn observe(&mut self, sent_at_micros: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        let now = now_micros();
+        if now < sent_at_micros {
+            return;
+        }
+
+        let one_way_micros = now - sent_at_micros;
+        self.samples = self.samples.saturating_add(1);
+        self.total_micros = self.total_micros.saturating_add(u128::from(one_way_micros));
+        self.max_micros = self.max_micros.max(one_way_micros);
+        if one_way_micros > 5_000 {
+            self.over_hard_max_samples = self.over_hard_max_samples.saturating_add(1);
+        }
+
+        if now >= self.next_report_at_micros {
+            self.report(now);
+        }
+    }
+
+    fn report(&mut self, now: u64) {
+        if self.samples == 0 {
+            self.next_report_at_micros = now.saturating_add(1_000_000);
+            return;
+        }
+
+        let avg_micros = (self.total_micros / u128::from(self.samples)) as f64;
+        let avg_ms = avg_micros / 1000.0;
+        let max_ms = self.max_micros as f64 / 1000.0;
+        let hard_max_rate = (self.over_hard_max_samples as f64 / self.samples as f64) * 100.0;
+        println!(
+            "latency window: avg {:.3}ms, max {:.3}ms, over-5ms {:.2}% (clock-sync dependent)",
+            avg_ms, max_ms, hard_max_rate
+        );
+
+        self.samples = 0;
+        self.over_hard_max_samples = 0;
+        self.total_micros = 0;
+        self.max_micros = 0;
+        self.next_report_at_micros = now.saturating_add(1_000_000);
+    }
 }

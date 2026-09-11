@@ -92,7 +92,7 @@ fn input_frames_stay_small_on_hot_path() {
     };
     let encrypted = encode_datagram(&mut sender, &datagram).expect("encode datagram");
     assert!(
-        encrypted.len() <= 96,
+        encrypted.len() <= 48,
         "mousemove frame should stay compact, got {} bytes",
         encrypted.len()
     );

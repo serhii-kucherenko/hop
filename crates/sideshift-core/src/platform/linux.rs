@@ -51,8 +51,7 @@ impl LocalInputCapture for LinuxMockInputCapture {
 struct LinuxMockInputInjector;
 
 impl RemoteInputInjector for LinuxMockInputInjector {
-    fn inject_event(&mut self, event: &InputEvent) -> Result<()> {
-        println!("injected remote event on Linux mock: {event:?}");
+    fn inject_event(&mut self, _event: &InputEvent) -> Result<()> {
         Ok(())
     }
 }
@@ -74,17 +73,15 @@ struct LinuxMockCursorController;
 
 impl CursorController for LinuxMockCursorController {
     fn hide_cursor(&mut self) -> Result<()> {
-        println!("Linux mock: hide cursor");
         Ok(())
     }
 
     fn show_cursor(&mut self) -> Result<()> {
-        println!("Linux mock: show cursor");
         Ok(())
     }
 
     fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenSize) -> Result<()> {
-        let target = match edge {
+        let _target = match edge {
             Edge::Left => CursorPosition {
                 x: (screen.width as i32) - 2,
                 y: (screen.height as i32) / 2,
@@ -102,7 +99,6 @@ impl CursorController for LinuxMockCursorController {
                 y: 1,
             },
         };
-        println!("Linux mock: warp local cursor to safe point: {target:?}");
         Ok(())
     }
 }
