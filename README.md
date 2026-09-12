@@ -43,7 +43,7 @@ Edge crossing switches ownership automatically while the daemon keeps running: t
 
 Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
 
-Use Ctrl+C only when you want to fully quit hop.
+Stop hop with Ctrl+C in each machine terminal; hop prints `hop stopped; local input restored` and releases local input.
 
 Manual end-to-end validation checklist: [MANUAL_E2E.md](MANUAL_E2E.md)
 

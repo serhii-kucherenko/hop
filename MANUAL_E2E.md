@@ -44,7 +44,7 @@ G. Keyboard follows ownership:
 
 H. Quit behavior:
 - Press Ctrl+C on server and client in separate runs.
-- Expected: app stops cleanly and prints a stopped message.
+- Expected: app stops cleanly and prints `hop stopped; local input restored`.
 - Expected: local input remains usable after stop.
 
 I. Restart and reconnect:
