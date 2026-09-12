@@ -8,6 +8,7 @@ hop is currently MVP-stage software and not yet hardened for hostile networks.
 
 hop is intended for a **trusted private LAN**:
 - peers are manually configured
+- pairing codes are intended only for same-LAN exchange during setup
 - both sides must share a passphrase
 - control and input packets are authenticated/encrypted
 

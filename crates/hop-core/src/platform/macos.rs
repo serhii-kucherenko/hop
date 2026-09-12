@@ -19,7 +19,8 @@ use hop_protocol::datagram::{InputEvent, MouseButton};
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode};
 use crate::platform::{
-    CursorController, LocalInputCapture, PlatformAdapters, RemoteInputInjector, ScreenInfoProvider,
+    CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
+    ScreenInfoProvider,
 };
 
 pub fn build_platform_adapters() -> PlatformAdapters {
@@ -28,6 +29,21 @@ pub fn build_platform_adapters() -> PlatformAdapters {
         input_injector: Box::new(MacosInputInjector::new()),
         screen_provider: Box::new(MacosScreenProvider),
         cursor_controller: Box::new(MacosCursorController::new()),
+    }
+}
+
+pub fn permission_status() -> PermissionStatus {
+    let probe = CGEventTap::new(
+        CGEventTapLocation::HID,
+        CGEventTapPlacement::HeadInsertEventTap,
+        CGEventTapOptions::ListenOnly,
+        vec![CGEventType::KeyDown, CGEventType::MouseMoved],
+        |_proxy, _event_type, _event| None,
+    );
+    if probe.is_ok() {
+        PermissionStatus::Granted
+    } else {
+        PermissionStatus::Missing
     }
 }
 

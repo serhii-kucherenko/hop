@@ -7,7 +7,8 @@ use hop_protocol::datagram::InputEvent;
 
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::{
-    CursorController, LocalInputCapture, PlatformAdapters, RemoteInputInjector, ScreenInfoProvider,
+    CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
+    ScreenInfoProvider,
 };
 
 const DEFAULT_SCREEN_WIDTH: u32 = 1920;
@@ -20,6 +21,10 @@ pub fn build_platform_adapters() -> PlatformAdapters {
         screen_provider: Box::new(LinuxMockScreenProvider),
         cursor_controller: Box::new(LinuxMockCursorController),
     }
+}
+
+pub fn permission_status() -> PermissionStatus {
+    PermissionStatus::Unknown
 }
 
 #[derive(Debug)]

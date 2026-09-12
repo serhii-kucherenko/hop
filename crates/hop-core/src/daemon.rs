@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::config::{Config, PeerConfig};
+use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{ScreenSize, SpatialLayout, SpatialNeighbor};
 use crate::platform::build_platform_adapters;
@@ -41,17 +41,6 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
             width: config.local.screen_width,
             height: config.local.screen_height,
         });
-    let layout = SpatialLayout::new(
-        config
-            .peers
-            .iter()
-            .map(|peer| SpatialNeighbor {
-                machine_name: peer.machine_name.clone(),
-                position: peer.position,
-            })
-            .collect(),
-    );
-
     println!(
         "starting hop server on control {} (data {}), waiting for client...",
         config.local.control_bind, config.local.data_bind
@@ -75,11 +64,21 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
 
     let (mut stream, addr) = listener.accept().await.context("failed to accept client")?;
     println!("control client connected from {addr}");
-    let peer = find_peer_for_client(&config, addr.ip().to_string())
-        .unwrap_or_else(|| config.first_peer().clone());
     let (hello, mut cipher) =
         complete_server_auth(&mut stream, config.local.shared_secret.as_bytes()).await?;
     println!("authenticated peer machine {}", hello.machine_name);
+    let peer_data_addr = SocketAddr::new(addr.ip(), hello.udp_port);
+
+    let dynamic_layout = SpatialLayout::new(
+        config
+            .peers
+            .iter()
+            .map(|peer| SpatialNeighbor {
+                machine_name: hello.machine_name.clone(),
+                position: peer.position,
+            })
+            .collect(),
+    );
 
     let hello_msg = ControlMessage::Hello {
         machine_name: config.local.machine_name.clone(),
@@ -93,11 +92,6 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     send_control_message(&mut stream, &mut cipher, &hello_msg).await?;
     println!("control channel encrypted and ready");
 
-    let peer_data_addr: SocketAddr = peer
-        .data_addr
-        .parse()
-        .with_context(|| format!("invalid peer data_addr {}", peer.data_addr))?;
-
     let mut handoff = HandoffController::new(config.local.machine_name.clone());
     let mut ticker = tokio::time::interval(Duration::from_millis(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -106,7 +100,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         ticker.tick().await;
 
         if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
-            let action = handoff.on_local_cursor(cursor, local_screen, &layout);
+            let action = handoff.on_local_cursor(cursor, local_screen, &dynamic_layout);
             if let HandoffAction::Begin {
                 target_machine,
                 edge,
@@ -153,10 +147,12 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(&peer.control_addr)
         .await
         .with_context(|| format!("failed to connect to server {}", peer.control_addr))?;
+    let udp_port = parse_port(&config.local.data_bind)?;
     let (_hello, mut cipher) = complete_client_auth(
         &mut stream,
         config.local.shared_secret.as_bytes(),
         &config.local.machine_name,
+        udp_port,
     )
     .await?;
     println!("control connection established and authenticated");
@@ -235,9 +231,10 @@ async fn complete_client_auth(
     stream: &mut TcpStream,
     secret: &[u8],
     machine_name: &str,
+    udp_port: u16,
 ) -> anyhow::Result<(AuthChallenge, CipherState)> {
     let mut rng = thread_rng();
-    let hello = build_client_hello(machine_name, &mut rng);
+    let hello = build_client_hello(machine_name, udp_port, &mut rng);
     write_frame(stream, &encode_plain(&hello)?).await?;
 
     let challenge_bytes = read_frame(stream).await?;
@@ -290,14 +287,6 @@ fn parse_port(bind_addr: &str) -> anyhow::Result<u16> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("invalid bind address {bind_addr}"))?;
     Ok(port_str.parse::<u16>()?)
-}
-
-fn find_peer_for_client(config: &Config, client_ip: String) -> Option<PeerConfig> {
-    config
-        .peers
-        .iter()
-        .find(|peer| peer.control_addr.starts_with(client_ip.as_str()))
-        .cloned()
 }
 
 fn now_micros() -> u64 {

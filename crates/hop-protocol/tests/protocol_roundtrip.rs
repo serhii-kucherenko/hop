@@ -14,7 +14,7 @@ const SECRET: &[u8] = b"example-shared-secret";
 #[test]
 fn handshake_and_key_derivation_are_consistent() {
     let mut rng = StdRng::seed_from_u64(42);
-    let hello = build_client_hello("macbook-pro", &mut rng);
+    let hello = build_client_hello("macbook-pro", 4601, &mut rng);
     let challenge = build_server_challenge(SECRET, &hello, &mut rng);
 
     verify_server_challenge(SECRET, &hello, &challenge).expect("challenge should verify");

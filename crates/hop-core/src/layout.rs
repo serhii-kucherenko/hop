@@ -1,5 +1,5 @@
 use hop_protocol::control::Edge;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorPosition {
@@ -13,7 +13,7 @@ pub struct ScreenSize {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RelativePosition {
     Left,
