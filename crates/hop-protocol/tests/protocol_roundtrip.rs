@@ -1,13 +1,13 @@
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use sideshift_protocol::auth::{
+use hop_protocol::auth::{
     build_client_hello, build_client_proof, build_server_challenge, derive_session_key,
     verify_client_proof, verify_server_challenge,
 };
-use sideshift_protocol::control::{ControlMessage, Edge, NodeRole, ScreenSize};
-use sideshift_protocol::crypto::CipherState;
-use sideshift_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
-use sideshift_protocol::frame::{decode_control, encode_control};
+use hop_protocol::control::{ControlMessage, Edge, NodeRole, ScreenSize};
+use hop_protocol::crypto::CipherState;
+use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
+use hop_protocol::frame::{decode_control, encode_control};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 const SECRET: &[u8] = b"example-shared-secret";
 

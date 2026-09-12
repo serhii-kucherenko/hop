@@ -8,9 +8,9 @@ use crate::PROTOCOL_VERSION;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const AUTH_LABEL: &[u8] = b"sideshift-auth-v1";
-const PROOF_LABEL: &[u8] = b"sideshift-proof-v1";
-const SESSION_LABEL: &[u8] = b"sideshift-session-v1";
+const AUTH_LABEL: &[u8] = b"hop-auth-v1";
+const PROOF_LABEL: &[u8] = b"hop-proof-v1";
+const SESSION_LABEL: &[u8] = b"hop-session-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthHello {

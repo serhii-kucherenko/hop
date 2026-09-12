@@ -1,238 +1,92 @@
-# SideShift
+# hop
 
-SideShift is an open-source LAN input handoff daemon for **one mouse + one keyboard across two machines**.
+hop forwards mouse and keyboard input between two machines over a local network.
 
-Typical setup:
-- Logitech mouse + keyboard are physically paired to your **primary** machine
-- Mac and Windows sit side by side
-- When the cursor reaches a configured edge (for example, the right edge on Mac), focus hands off to Windows
-- Keyboard input follows that focus
+Latency budget: 1-3ms target and 5ms hard max on wired LAN; Wi-Fi is best-effort and may exceed that.
 
-> SideShift is a network handoff tool (Synergy/Deskflow style), **not** a Bluetooth re-pairing tool.
-> Clipboard sync is intentionally out of scope for this MVP.
+## Quick start (Mac primary -> Windows secondary)
 
-## MVP status
-
-This repository contains the first MVP architecture and command-line daemon:
-- Rust workspace with protocol + daemon core + CLI
-- Authenticated + encrypted control and input channel primitives
-- Spatial layout and edge-handoff state machine
-- macOS / Windows platform adapters behind trait boundaries
-- Linux mock adapters so CI runs on Linux now
-
-Native event capture/injection paths now use real platform APIs (CoreGraphics event tap/post on macOS and low-level hooks/SendInput on Windows) while Linux remains mock-only for CI.
-
-## Why SideShift exists
-
-Logi Flow is convenient but tied to Logitech ecosystem behavior and device switching. SideShift aims for:
-- open protocol and source code
-- explicit machine layout control
-- predictable local network behavior
-- no vendor-specific Bluetooth protocol work
-
-## Current architecture
-
-Workspace layout:
-
-```text
-crates/
-  sideshift-protocol/   # Auth handshake, encrypted frame/datagram codecs
-  sideshift-core/       # Config, layout, handoff state machine, platform traits, daemon loops
-  sideshift/            # CLI binary
-```
-
-### Protocol choice
-
-This MVP uses:
-- **TCP control channel** for reliable coordination messages (hello, handoff start/end, keepalive)
-- **UDP datagrams** for low-latency input events
-- **Pre-shared secret authentication + session key derivation (HKDF)**
-- **ChaCha20-Poly1305 authenticated encryption** for both control frames and input datagrams
-- **One handshake per session, then sealed datagrams** (no per-event crypto round-trip)
-
-Rationale:
-- control events need ordered/reliable delivery
-- mouse/keyboard deltas must stay on a non-blocking datagram path, not a clipboard/file stream
-- hot-path frames are intentionally tiny (relative pointer deltas + button/key codes)
-- transport and platform layers stay separable for future QUIC migration
-
-## Latency target and expectations
-
-SideShift is designed around a latency-first goal:
-- **Wired same-LAN target:** end-to-end input latency in the **1–3ms** range
-- **Hard max target:** **5ms** on a quiet gigabit LAN
-
-Reality check for Wi-Fi (best-effort only):
-- modern 5GHz/6GHz Wi-Fi can feel good, but contention, power saving, and interference can add jitter spikes
-- Wi-Fi can miss the 5ms hard max, especially in busy RF environments
-
-### What dominates latency
-
-Most delay comes from three buckets:
-1. **Capture time** on the server OS (event tap/hook behavior and scheduling)
-2. **Network transit** (LAN RTT + jitter, queueing, AP behavior on Wi-Fi)
-3. **Injection time** on the client OS (native input API + scheduler timing)
-
-Crypto overhead is usually small relative to those three once the session key is established.
-The hot path is built to avoid additional round-trips and avoid unnecessary per-event logging.
-
-### How to test quickly
-
-1. **Loopback sanity:** run server+client on one machine to validate software path and logs
-2. **Two-machine LAN check:** verify ping stability between machines (`ping` baseline)
-3. **Subjective edge-flick test:** rapidly flick to the configured handoff edge and type immediately on the other machine
-
-Optional runtime hook:
-- run client with `--log-latency` to print a rolling one-way estimate window (clock-sync dependent)
-- command `sideshift bench` is reserved as a future active benchmark hook against the 1–3ms goal / 5ms hard max
-
-Compared with Logi Flow-style Bluetooth switching, SideShift avoids Bluetooth re-pair handoff delays by keeping ownership fixed on the server and forwarding events over LAN.
-
-See [LATENCY.md](LATENCY.md) for a short checklist-focused version.
-
-## What this MVP does not do
-
-- Clipboard or file transfer
-- Bluetooth hopping / Logitech protocol cloning
-- Linux as a first-class desktop target (Linux mock is for CI/dev)
-- Multi-monitor spatial graphs (single display per machine for now)
-- Auto-discovery / mDNS
-
-## Local config
-
-Copy `sideshift.example.json` to `sideshift.json` and edit values:
+1. Build `hop` on both machines.
 
 ```bash
-cp sideshift.example.json sideshift.json
+git clone https://github.com/serhii-kucherenko/hop.git
+cd hop
+cargo build --release -p hop
 ```
 
-Key fields:
-- `local.machine_name`: unique ID for this machine
-- `local.role`: `server` or `client`
-- `control_bind` / `data_bind`: local bind addresses
-- `shared_secret`: passphrase shared by both machines
-- `peers[*]`: remote machine addresses + relative position (`left|right|above|below`)
-
-## Run the daemon
-
-Server machine:
+2. Create config files on both machines.
 
 ```bash
-cargo run -p sideshift -- run --config sideshift.json --role server
+cp hop.example.json hop.json
 ```
 
-Client machine:
+3. Edit `hop.json` on each machine.
+   - Keep the same `shared_secret` on both.
+   - Set `local.role` to `server` on the primary machine and `client` on the secondary.
+   - Set `peers` so each machine points to the other machine's IP/ports.
+
+Minimal shape:
+
+```json
+{
+  "local": {
+    "machine_name": "macbook-pro",
+    "role": "server",
+    "control_bind": "0.0.0.0:4600",
+    "data_bind": "0.0.0.0:4601",
+    "shared_secret": "replace-with-strong-passphrase",
+    "screen_width": 1728,
+    "screen_height": 1117
+  },
+  "peers": [
+    {
+      "machine_name": "windows-desktop",
+      "control_addr": "192.168.1.52:4600",
+      "data_addr": "192.168.1.52:4601",
+      "position": "right"
+    }
+  ]
+}
+```
+
+4. On macOS, grant permissions before first real run.
+   - System Settings -> Privacy & Security -> Accessibility
+   - System Settings -> Privacy & Security -> Input Monitoring
+   - Add the `hop` binary (or Terminal while developing), enable both, then relaunch the process.
+
+5. Start server on the primary machine.
 
 ```bash
-cargo run -p sideshift -- run --config sideshift.json --role client
+./target/release/hop run --config hop.json --role server
 ```
 
-The CLI prints:
-- connection/authentication status
-- handoff transitions
-- injected input events on mock/dev paths
-
-Latency hook example:
+6. Start client on the secondary machine.
 
 ```bash
-cargo run -p sideshift -- run --config sideshift.json --role client --log-latency
+./target/release/hop run --config hop.json --role client
 ```
 
-## macOS + Windows setup path
+7. Flick the cursor across the configured edge on the primary machine; cursor and keyboard focus should follow on the secondary machine.
 
-### 1) Choose ownership machine
+## How it works
 
-Pick the machine that physically owns the Logitech-paired devices as SideShift **server**.
+`hop` keeps input ownership on the server machine and forwards events over LAN to the client machine. Control messages run on an encrypted TCP channel, and input events run on encrypted UDP datagrams to minimize handoff latency. It is a network handoff model, not Bluetooth re-pairing.
 
-### 2) Network + config
+## Permissions and known gaps
 
-- Place both machines on the same trusted LAN
-- Set fixed/private IPs or DHCP reservations if possible
-- Configure each machine’s JSON with matching `shared_secret`
-- Mirror peer addresses and opposite positions
+- macOS secure input contexts (some password/login flows) can block keyboard capture/injection.
+- Windows elevated or secure desktop surfaces (UAC/admin contexts) can block hooks or injection when privilege levels do not match.
+- Linux remains mock-only in CI; native desktop capture/injection validation is focused on macOS and Windows.
 
-### 3) Permissions
+## More detail
 
-#### macOS (required for real capture/injection work)
+- Latency notes and validation checklist: [LATENCY.md](LATENCY.md)
+- Trust model and reporting guidance: [SECURITY.md](SECURITY.md)
+- Contribution workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-Grant SideShift binary:
-- **Accessibility** permission
-- **Input Monitoring** permission
+## Comparison (short)
 
-Recommended grant path:
-1. Open **System Settings → Privacy & Security → Accessibility**
-2. Add your SideShift binary (or Terminal while developing), then enable it
-3. Open **System Settings → Privacy & Security → Input Monitoring**
-4. Add the same binary (or Terminal), then enable it
-5. Fully quit and relaunch the process after granting permissions
-
-#### Windows (required for real injection/capture work)
-
-Allow the binary through Windows Firewall on private networks.
-Run SideShift inside the active desktop user session (not as a background service). If the target app is elevated (Run as Administrator) or in a secure desktop/UAC prompt, SideShift may also need to run elevated to capture/inject there.
-
-### 4) Launch order
-
-1. Start server
-2. Start client
-3. Move cursor to configured handoff edge on server machine
-4. Confirm cursor movement and keyboard typing appear on the client machine
-
-### Known native gaps (current MVP)
-
-- **macOS secure input contexts** (some password fields, lock/login surfaces) can block keyboard capture/injection by design.
-- **Windows elevated/secure desktop surfaces** (UAC prompts, admin apps from unelevated SideShift) can block hook visibility or input injection.
-- Key mapping currently targets common ANSI keys, modifiers, arrows, navigation, numpad, and function keys; uncommon OEM/media keys may need additional mapping coverage.
-
-## Development
-
-Prerequisites:
-- Rust toolchain (this repo currently validates on Rust 1.83 in CI)
-
-Commands:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-### Linux CI note
-
-Linux uses mock platform adapters so protocol/layout/state behavior remains testable in CI even without native desktop APIs.
-This includes latency-sensitive framing/state logic, while native capture/inject latency still requires macOS/Windows hardware validation.
-
-## Comparison: SideShift vs Deskflow vs Logi Flow
-
-### SideShift MVP (this repo)
-- Focus: minimal, auditable codebase with clear architecture
-- Protocol: PSK-authenticated encrypted channels over TCP + UDP
-- UI: CLI only
-- Platforms: macOS/Windows adapters scaffolded; Linux mock for CI
-
-### Deskflow / Synergy-line projects
-- More mature feature set and production hardening
-- Broader compatibility and UI tooling
-- Better immediate fit if you need turnkey daily-driver behavior today
-
-### Logitech Flow
-- Tight Logitech ecosystem integration
-- Device-centric switching behavior
-- Not an open, vendor-neutral network daemon
-
-## Security model (MVP)
-
-SideShift assumes a **trusted LAN** with a strong shared secret:
-- all control/input packets are authenticated and encrypted
-- no automatic peer discovery in MVP (manual endpoint config only)
-- no cloud relay path
-
-See [SECURITY.md](SECURITY.md) for details and reporting guidance.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+- `hop`: small CLI-first codebase focused on low-latency LAN handoff.
+- Deskflow/Synergy family: broader feature set and more mature desktop UX.
+- Logi Flow: tight Logitech ecosystem integration, but not an open protocol daemon.
+- `hop` does not attempt Bluetooth device switching; it forwards input over the network.

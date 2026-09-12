@@ -13,8 +13,8 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
-use sideshift_protocol::control::Edge;
-use sideshift_protocol::datagram::{InputEvent, MouseButton};
+use hop_protocol::control::Edge;
+use hop_protocol::datagram::{InputEvent, MouseButton};
 
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode};
@@ -110,7 +110,7 @@ impl MacosInputCapture {
         let state = Arc::new(MacosCaptureState::new());
         if let Err(error) = start_event_tap(state.clone()) {
             eprintln!(
-                "macOS capture disabled: {error}. Grant Input Monitoring + Accessibility and relaunch SideShift."
+                "macOS capture disabled: {error}. Grant Input Monitoring + Accessibility and relaunch hop."
             );
         }
 
@@ -356,7 +356,7 @@ fn query_cursor_position() -> Result<CursorPosition> {
 fn start_event_tap(state: Arc<MacosCaptureState>) -> Result<()> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("sideshift-macos-capture".to_owned())
+        .name("hop-macos-capture".to_owned())
         .spawn(move || {
             let setup_result = install_and_run_event_tap(state, &ready_tx);
             if let Err(error) = setup_result {

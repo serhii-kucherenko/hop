@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use sideshift_core::config::Config;
-use sideshift_core::daemon;
-use sideshift_protocol::control::NodeRole;
+use hop_core::config::Config;
+use hop_core::daemon;
+use hop_protocol::control::NodeRole;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "sideshift",
-    about = "SideShift daemon for cross-machine mouse and keyboard handoff"
+    name = "hop",
+    about = "hop daemon for cross-machine mouse and keyboard handoff"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,8 +19,8 @@ struct Cli {
 enum Commands {
     /// Start the daemon in either server or client mode.
     Run {
-        /// Path to SideShift JSON config.
-        #[arg(long, default_value = "sideshift.json")]
+        /// Path to hop JSON config.
+        #[arg(long, default_value = "hop.json")]
         config: PathBuf,
         /// Override role from the config.
         #[arg(long)]

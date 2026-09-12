@@ -1,4 +1,4 @@
-use sideshift_protocol::control::Edge;
+use hop_protocol::control::Edge;
 
 use crate::layout::{detect_edge_crossing, CursorPosition, ScreenSize, SpatialLayout};
 
