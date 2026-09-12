@@ -4,6 +4,7 @@ use hop_core::layout::{
     SpatialNeighbor,
 };
 use hop_protocol::control::Edge;
+use hop_protocol::datagram::InputEvent;
 
 fn two_machine_layout() -> SpatialLayout {
     SpatialLayout::new(vec![SpatialNeighbor {
@@ -50,7 +51,8 @@ fn handoff_begins_when_crossing_edge_with_neighbor() {
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
 
-    let action = controller.on_local_cursor(CursorPosition { x: 1921, y: 400 }, screen, &layout);
+    let action =
+        controller.on_local_cursor(CursorPosition { x: 1921, y: 400 }, screen, &layout, &[]);
     assert_eq!(
         action,
         HandoffAction::Begin {
@@ -75,7 +77,7 @@ fn handoff_release_returns_focus_locally() {
     };
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
-    let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout);
+    let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
 
     let release = controller.on_remote_release();
     assert_eq!(
@@ -98,7 +100,104 @@ fn no_handoff_when_crossing_without_neighbor() {
         height: 1080,
     };
     let mut controller = HandoffController::new("macbook-pro");
-    let action = controller.on_local_cursor(CursorPosition { x: 1921, y: 20 }, screen, &layout);
+    let action =
+        controller.on_local_cursor(CursorPosition { x: 1921, y: 20 }, screen, &layout, &[]);
     assert_eq!(action, HandoffAction::None);
     assert_eq!(controller.focus_state(), &FocusState::Local);
+}
+
+#[test]
+fn handoff_begins_when_pushing_into_clamped_right_edge() {
+    let layout = two_machine_layout();
+    let screen = ScreenSize {
+        width: 1920,
+        height: 1080,
+    };
+    let mut controller = HandoffController::new("macbook-pro");
+    let edge_cursor = CursorPosition { x: 1919, y: 320 };
+
+    let first_push = [InputEvent::MouseMove { dx: 2, dy: 0 }];
+    let action = controller.on_local_cursor(edge_cursor, screen, &layout, &first_push);
+    assert_eq!(action, HandoffAction::None);
+
+    let second_push = [InputEvent::MouseMove { dx: 3, dy: 0 }];
+    let action = controller.on_local_cursor(edge_cursor, screen, &layout, &second_push);
+    assert_eq!(
+        action,
+        HandoffAction::Begin {
+            target_machine: "windows-box".to_owned(),
+            edge: Edge::Right
+        }
+    );
+}
+
+#[test]
+fn handoff_requires_outbound_motion_on_clamped_edge() {
+    let layout = two_machine_layout();
+    let screen = ScreenSize {
+        width: 1920,
+        height: 1080,
+    };
+    let mut controller = HandoffController::new("macbook-pro");
+    let edge_cursor = CursorPosition { x: 1919, y: 320 };
+
+    for _ in 0..3 {
+        let action = controller.on_local_cursor(
+            edge_cursor,
+            screen,
+            &layout,
+            &[InputEvent::MouseMove { dx: -2, dy: 0 }],
+        );
+        assert_eq!(action, HandoffAction::None);
+    }
+
+    assert_eq!(controller.focus_state(), &FocusState::Local);
+}
+
+#[test]
+fn sticky_handoff_supports_left_top_and_bottom_edges() {
+    let screen = ScreenSize {
+        width: 1920,
+        height: 1080,
+    };
+    let cases = [
+        (
+            RelativePosition::Left,
+            CursorPosition { x: 0, y: 200 },
+            InputEvent::MouseMove { dx: -2, dy: 0 },
+            Edge::Left,
+        ),
+        (
+            RelativePosition::Above,
+            CursorPosition { x: 200, y: 0 },
+            InputEvent::MouseMove { dx: 0, dy: -2 },
+            Edge::Top,
+        ),
+        (
+            RelativePosition::Below,
+            CursorPosition { x: 200, y: 1079 },
+            InputEvent::MouseMove { dx: 0, dy: 2 },
+            Edge::Bottom,
+        ),
+    ];
+
+    for (position, cursor, push, expected_edge) in cases {
+        let layout = SpatialLayout::new(vec![SpatialNeighbor {
+            machine_name: "windows-box".to_owned(),
+            position,
+        }]);
+        let mut controller = HandoffController::new("macbook-pro");
+        let action =
+            controller.on_local_cursor(cursor, screen, &layout, std::slice::from_ref(&push));
+        assert_eq!(action, HandoffAction::None);
+
+        let action = controller.on_local_cursor(cursor, screen, &layout, &[push]);
+        assert_eq!(
+            action,
+            HandoffAction::Begin {
+                target_machine: "windows-box".to_owned(),
+                edge: expected_edge,
+            }
+        );
+    }
 }

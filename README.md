@@ -37,7 +37,7 @@ hop <code-from-server>
 
 This writes config, connects to the server, and starts the client automatically.
 
-4. Flick across the configured edge on the server machine.
+4. Push into the configured edge on the server machine (sticky edge handoff). You do not need to move beyond the display bounds.
 
 Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; moving left from the Mac returns control. Override with `hop pair --position <left|right|above|below>` if needed.
 

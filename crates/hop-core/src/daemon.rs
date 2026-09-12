@@ -98,9 +98,11 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
 
     loop {
         ticker.tick().await;
+        let pending_events = adapters.input_capture.poll_input_events()?;
 
         if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
-            let action = handoff.on_local_cursor(cursor, local_screen, &dynamic_layout);
+            let action =
+                handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
             if let HandoffAction::Begin {
                 target_machine,
                 edge,
@@ -117,14 +119,14 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
                 };
                 send_control_message(&mut stream, &mut cipher, &message).await?;
                 println!(
-                    "handoff started from {} to {} through {:?}",
+                    "handoff begin: from={} to={} edge={:?}",
                     config.local.machine_name, target_machine, edge
                 );
             }
         }
 
         if matches!(handoff.focus_state(), FocusState::Remote { .. }) {
-            for event in adapters.input_capture.poll_input_events()? {
+            for event in pending_events {
                 let datagram = InputDatagram {
                     event,
                     sent_at_micros: now_micros(),
@@ -204,18 +206,30 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
         tokio::select! {
             result = recv_control_message(&mut stream, &mut cipher) => {
                 let message = result?;
-                println!("control message: {message:?}");
                 match message {
-                    ControlMessage::HandoffStart { to_machine, .. } => {
+                    ControlMessage::HandoffStart {
+                        from_machine,
+                        to_machine,
+                        edge,
+                    } => {
                         if to_machine == config.local.machine_name {
                             handoff_active = true;
+                            println!(
+                                "handoff begin: from={} to={} edge={:?}; enabling client injection",
+                                from_machine, to_machine, edge
+                            );
+                        } else {
+                            println!(
+                                "handoff start ignored: from={} to={} edge={:?}",
+                                from_machine, to_machine, edge
+                            );
                         }
                     }
                     ControlMessage::HandoffEnd { owner_machine } => {
                         handoff_active = false;
-                        println!("control returned to {owner_machine}");
+                        println!("handoff end: owner={owner_machine}; disabling client injection");
                     }
-                    _ => {}
+                    other => println!("control message: {other:?}"),
                 }
             }
             datagram = udp_socket.recv_from(&mut datagram_buffer) => {
