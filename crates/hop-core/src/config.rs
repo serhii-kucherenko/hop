@@ -41,8 +41,16 @@ pub struct PeerConfig {
 pub struct HandoffConfig {
     #[serde(default)]
     pub mode: HandoffMode,
+    /// Uniform peer -> Easy-Switch host index fallback (`0` = channel 1).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub logi_peer_host_index: HashMap<String, u8>,
+    /// Optional per-device peer maps: peer machine -> {"keyboard"|"mouse" -> host index}.
+    /// When present for a peer, overrides the uniform `logi_peer_host_index` for those kinds.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub logi_peer_device_host_index: HashMap<String, HashMap<String, u8>>,
+    /// Optional local per-device host indexes for switch-back: {"keyboard"|"mouse" -> host index}.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub logi_local_device_host_index: HashMap<String, u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -154,6 +162,8 @@ mod tests {
 
         assert_eq!(parsed.handoff.mode, HandoffMode::Auto);
         assert!(parsed.handoff.logi_peer_host_index.is_empty());
+        assert!(parsed.handoff.logi_peer_device_host_index.is_empty());
+        assert!(parsed.handoff.logi_local_device_host_index.is_empty());
     }
 
     #[test]
@@ -189,5 +199,55 @@ mod tests {
 
         assert_eq!(parsed.handoff.mode, HandoffMode::Logi);
         assert_eq!(parsed.handoff.logi_peer_host_index.get("macbook"), Some(&1));
+    }
+
+    #[test]
+    fn handoff_per_device_maps_parse_from_json() {
+        let parsed: Config = serde_json::from_str(
+            r#"{
+                "local": {
+                    "machine_name": "nucbox",
+                    "role": "server",
+                    "control_bind": "0.0.0.0:4600",
+                    "data_bind": "0.0.0.0:4601",
+                    "shared_secret": "0123456789abcdef",
+                    "screen_width": 1920,
+                    "screen_height": 1080
+                },
+                "peers": [
+                    {
+                        "machine_name": "hop-machine",
+                        "control_addr": "192.168.1.2:4600",
+                        "data_addr": "192.168.1.2:4601",
+                        "position": "right"
+                    }
+                ],
+                "handoff": {
+                    "mode": "auto",
+                    "logi_peer_device_host_index": {
+                        "hop-machine": { "keyboard": 0, "mouse": 0 }
+                    },
+                    "logi_local_device_host_index": { "keyboard": 1, "mouse": 2 }
+                }
+            }"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(parsed.handoff.mode, HandoffMode::Auto);
+        let peer = parsed
+            .handoff
+            .logi_peer_device_host_index
+            .get("hop-machine")
+            .expect("peer device map");
+        assert_eq!(peer.get("keyboard"), Some(&0));
+        assert_eq!(peer.get("mouse"), Some(&0));
+        assert_eq!(
+            parsed.handoff.logi_local_device_host_index.get("keyboard"),
+            Some(&1)
+        );
+        assert_eq!(
+            parsed.handoff.logi_local_device_host_index.get("mouse"),
+            Some(&2)
+        );
     }
 }

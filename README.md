@@ -105,13 +105,20 @@ If Logi switching is requested but fails or times out, hop falls back to the net
     "mode": "auto",
     "logi_peer_host_index": {
       "macbook-pro": 1
-    }
+    },
+    "logi_peer_device_host_index": {
+      "macbook-pro": { "keyboard": 1, "mouse": 2 }
+    },
+    "logi_local_device_host_index": { "keyboard": 0, "mouse": 0 }
   }
 }
 ```
 
 - `handoff.mode`: `auto` (default) | `logi` | `network`
-- `handoff.logi_peer_host_index`: peer -> Easy-Switch host index map (`0` = channel 1, `1` = channel 2, `2` = channel 3). **Required for HID++-only setups** (HID++ does not expose host names). If omitted and Options+ is available, hop may auto-map using Options+ host names/OS hints. Run `hop doctor` to see HID++ devices, Options+ status, and the peer→channel map.
+- `handoff.logi_peer_host_index`: uniform peer -> Easy-Switch host index map (`0` = channel 1, `1` = channel 2, `2` = channel 3). Useful when keyboard and mouse share one channel. **Required for HID++-only setups** unless you set per-device maps (HID++ does not expose host names). If omitted and Options+ is available, hop may auto-map using Options+ host names/OS hints.
+- `handoff.logi_peer_device_host_index`: optional peer -> `{"keyboard"|"mouse" -> host index}` map. When present for a peer, hop switches keyboard and mouse independently (for setups where Easy-Switch channels differ per device).
+- `handoff.logi_local_device_host_index`: optional local `{"keyboard"|"mouse" -> host index}` used when switching back to this machine. Falls back to the detected local host slot when omitted.
+- Run `hop doctor` to see HID++ devices, Options+ status, uniform peer→channel maps, and per-device maps.
 
 ### Clipboard sync (MVP)
 

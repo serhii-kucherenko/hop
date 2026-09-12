@@ -20,7 +20,11 @@
   "handoff": {
     "mode": "auto",
     "logi_peer_host_index": {
-      "windows-desktop": 0
-    }
+      "windows-desktop": 1
+    },
+    "logi_peer_device_host_index": {
+      "windows-desktop": { "keyboard": 1, "mouse": 2 }
+    },
+    "logi_local_device_host_index": { "keyboard": 0, "mouse": 0 }
   }
 }
