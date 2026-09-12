@@ -90,8 +90,10 @@ Use `--config <path>` with any command to override the config location.
 `hop` keeps an encrypted control channel over TCP for handoff coordination and clipboard sync.
 
 - In `network` mode, input ownership stays on the server and mouse/keyboard events are forwarded to the client over encrypted UDP datagrams.
-- In `logi` mode, edge handoff triggers native Logitech Easy-Switch channel changes through Logi Options+ agent IPC (equivalent to pressing Easy-Switch 1/2/3), and hop does not forward input over UDP for that handoff.
-- In `auto` mode (default), hop chooses `logi` when Options+ + Easy-Switch devices are ready; otherwise it uses `network`.
+- In `logi` / `auto` mode, edge handoff prefers **direct HID++ ChangeHost (feature 0x1814)** on Logitech devices (MX mouse + Casa Keys / MX Keys), equivalent to pressing Easy-Switch 1/2/3. Options+ IPC is optional and used only when HID++ is unavailable.
+- Windows HID++ works without Options+. macOS HID++ is best-effort and may require Input Monitoring for the `hop` binary.
+- Bolt receivers typically switch faster/more reliably than BLE; if a channel's host is asleep, the device can park on a dead channel until you wake that host or use the physical Easy-Switch button.
+- In `auto` mode (default), hop chooses Logi when HID++ (or Options+) devices with a peer host mapping are ready; otherwise it uses `network`.
 
 If Logi switching is requested but fails or times out, hop falls back to the network handoff path for that session.
 
@@ -109,7 +111,7 @@ If Logi switching is requested but fails or times out, hop falls back to the net
 ```
 
 - `handoff.mode`: `auto` (default) | `logi` | `network`
-- `handoff.logi_peer_host_index`: optional explicit peer -> Easy-Switch host index map (`0` = channel 1, `1` = channel 2, `2` = channel 3). If omitted, hop auto-maps channels using Options+ Easy-Switch host names/OS hints.
+- `handoff.logi_peer_host_index`: peer -> Easy-Switch host index map (`0` = channel 1, `1` = channel 2, `2` = channel 3). **Required for HID++-only setups** (HID++ does not expose host names). If omitted and Options+ is available, hop may auto-map using Options+ host names/OS hints. Run `hop doctor` to see HID++ devices, Options+ status, and the peer→channel map.
 
 ### Clipboard sync (MVP)
 

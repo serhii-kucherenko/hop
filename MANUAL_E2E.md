@@ -120,11 +120,11 @@ Q. Bench command sanity:
 - Expected: p50/p95 one-way and RTT values are printed against 1-3ms goal and 5ms hard max.
 - If using wired LAN and `--strict`, command should fail when p95 one-way exceeds 5ms.
 
-Additional hybrid handoff cases (Logi Options+ + Easy-Switch):
+Additional hybrid handoff cases (HID++ ChangeHost first, Options+ optional):
 
 R. Auto mode chooses Logi path when available:
 - Set `handoff.mode` to `auto`.
-- Ensure Logi Options+ agent is running on both machines and paired MX/Casa keyboard+mouse are visible in Options+.
+- Ensure paired MX/Casa keyboard+mouse are present; `hop doctor` should show `hid++ ChangeHost` devices (Options+ optional).
 - With Mac hop online, push into Windows right edge (Mac on right).
 - Expected: devices switch to the Mac Easy-Switch host, and hop does not require UDP input forwarding for that handoff.
 - With Mac hop offline/off: same edge push must do nothing (no channel switch).
@@ -136,7 +136,7 @@ S. Return edge switches back to owner channel:
 - With Windows hop offline: Mac left-edge return must do nothing.
 
 T. Logi failure fallback:
-- Keep `handoff.mode` as `auto` or `logi`, then stop Options+ agent on one side (or use a device without Easy-Switch).
+- Keep `handoff.mode` as `auto` or `logi`, then disconnect Logi devices / clear `logi_peer_host_index` (or use a device without Easy-Switch).
 - Trigger handoff with peer still online.
 - Expected: hop falls back to existing network handoff behavior (A/B still pass).
 
@@ -148,4 +148,15 @@ U. Network-only mode bypasses Logi:
 V. Doctor/onboarding detection summary:
 - Run `hop doctor`.
 - Run fresh onboarding (`hop` on server then `hop <code>` on client).
-- Expected: summary includes OS, hostname, role hint, screen geometry, Options+ presence, detected Easy-Switch devices, and peer->channel mapping.
+- Expected: summary includes OS, hostname, role hint, screen geometry, HID++ devices, Options+ status separately, Easy-Switch devices, and peer->channel mapping.
+
+
+## Logi Easy-Switch (HID++)
+
+1. Pair MX mouse + keyboard to both machines (Easy-Switch channels).
+2. On each machine run `hop doctor` and confirm `hid++ ChangeHost` lists devices (not only `network-fallback`).
+3. Set `handoff.logi_peer_host_index` explicitly. Desk layout (Windows server, Mac on right):
+   - On Windows: peer Mac channel index (often `1` if Windows is channel 1 / index `0`)
+   - On Mac: peer Windows channel index (often `0`)
+4. Options+ may show as unavailable/gated; that is OK when HID++ works.
+5. BLE can be slower than Bolt; keep both hosts awake when switching.
