@@ -10,9 +10,10 @@ use std::time::Instant;
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
 use hop_core::clipboard::{clipboard_backend_status, ClipboardBackendStatus};
-use hop_core::config::{Config, LocalConfig, PeerConfig};
+use hop_core::config::{Config, HandoffConfig, LocalConfig, PeerConfig};
 use hop_core::daemon;
 use hop_core::layout::{invert_relative_position, RelativePosition, ScreenBounds};
+use hop_core::logi::LogiHandoff;
 use hop_core::platform::{build_platform_adapters, permission_status, PermissionStatus};
 use hop_protocol::auth::{
     build_client_hello, build_client_proof, derive_session_key, verify_server_challenge,
@@ -722,6 +723,7 @@ fn run_init(
             screen_height: screen.height,
         },
         peers: vec![config_peer],
+        handoff: HandoffConfig::default(),
     };
     config.write_json_path(config_path)?;
     println!("created {}", config_path.display());
@@ -790,6 +792,7 @@ async fn run_pair_server(
         pair_result.client_machine_name, pair_result.client_host
     );
     println!("updated {}", config_path.display());
+    print_environment_summary("onboarding", &config, screen_from_config(&config));
     Ok(config)
 }
 
@@ -825,6 +828,7 @@ async fn run_pair_client(
     config.write_json_path(config_path)?;
 
     println!("paired and updated {}", config_path.display());
+    print_environment_summary("onboarding", &config, screen_from_config(&config));
     Ok(config)
 }
 
@@ -902,6 +906,25 @@ async fn run_doctor(
         screen.max_y()
     );
     println!("build source: {}", build_source_label());
+    if let Some(config) = config.as_ref() {
+        print_environment_summary("doctor", config, screen);
+    } else {
+        let summary_config = Config {
+            local: LocalConfig {
+                machine_name: detect_machine_name(),
+                role: NodeRole::Server,
+                control_bind: format!("0.0.0.0:{DEFAULT_CONTROL_PORT}"),
+                data_bind: format!("0.0.0.0:{DEFAULT_DATA_PORT}"),
+                swap_ctrl_cmd: None,
+                shared_secret: String::new(),
+                screen_width: screen.width,
+                screen_height: screen.height,
+            },
+            peers: Vec::new(),
+            handoff: HandoffConfig::default(),
+        };
+        print_environment_summary("doctor", &summary_config, screen);
+    }
 
     match permission_status() {
         PermissionStatus::Granted => {
@@ -1081,6 +1104,18 @@ fn build_source_label() -> &'static str {
         "release binary"
     } else {
         "source build"
+    }
+}
+
+fn screen_from_config(config: &Config) -> ScreenBounds {
+    ScreenBounds::from_size(config.local.screen_width, config.local.screen_height)
+}
+
+fn print_environment_summary(label: &str, config: &Config, screen: ScreenBounds) {
+    let logi_handoff = LogiHandoff::from_config(config);
+    println!("{label} summary:");
+    for line in logi_handoff.summary_lines(config.local.role, screen) {
+        println!("  - {line}");
     }
 }
 
@@ -1388,6 +1423,7 @@ fn load_or_create_config(config_path: &Path, role: NodeRole) -> Config {
             data_addr: String::new(),
             position: peer_position,
         }],
+        handoff: HandoffConfig::default(),
     }
 }
 

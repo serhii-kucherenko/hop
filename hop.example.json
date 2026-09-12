@@ -16,5 +16,11 @@
       "data_addr": "192.168.1.52:4601",
       "position": "right"
     }
-  ]
+  ],
+  "handoff": {
+    "mode": "auto",
+    "logi_peer_host_index": {
+      "windows-desktop": 0
+    }
+  }
 }

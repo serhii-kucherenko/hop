@@ -3,7 +3,7 @@ use hop_protocol::auth::{
     verify_client_proof, verify_server_challenge,
 };
 use hop_protocol::control::{
-    ClipboardContent, ClipboardFile, ControlMessage, Edge, NodeRole, ScreenSize,
+    ClipboardContent, ClipboardFile, ControlMessage, Edge, HandoffTransport, NodeRole, ScreenSize,
 };
 use hop_protocol::crypto::CipherState;
 use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
@@ -38,6 +38,7 @@ fn control_message_roundtrip_through_cipher() {
         from_machine: "macbook-pro".to_owned(),
         to_machine: "win11".to_owned(),
         edge: Edge::Right,
+        transport: HandoffTransport::Network,
     };
 
     let packet = encode_control(&mut sender, &message).expect("encode control");
@@ -176,6 +177,7 @@ fn control_frame_is_not_rejected_after_datagram_burst() {
         from_machine: "macbook-pro".to_owned(),
         to_machine: "nucbox".to_owned(),
         edge: Edge::Right,
+        transport: HandoffTransport::Network,
     };
     let control_packet = encode_control(&mut sender, &control).expect("control frame");
 

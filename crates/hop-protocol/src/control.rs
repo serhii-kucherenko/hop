@@ -16,6 +16,13 @@ pub enum Edge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HandoffTransport {
+    Network,
+    Logi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenSize {
     pub width: u32,
     pub height: u32,
@@ -50,6 +57,7 @@ pub enum ControlMessage {
         from_machine: String,
         to_machine: String,
         edge: Edge,
+        transport: HandoffTransport,
     },
     HandoffStartAck {
         from_machine: String,

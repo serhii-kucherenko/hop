@@ -39,6 +39,8 @@ This writes config, connects to the server, and starts the client automatically.
 
 4. Push into the configured edge on the server machine (sticky edge handoff). You do not need to move beyond the display bounds.
 
+With `handoff.mode: "auto"` (default), hop prefers native Logitech Easy-Switch host changes when Logi Options+ and compatible multi-host devices are detected, and falls back to network input forwarding otherwise.
+
 Edge crossing switches ownership automatically while the daemon keeps running: the active machine receives input, and the inactive machine does not. Control is exclusive, not mirrored.
 
 Edge detection and return warps use the full virtual desktop bounds (multi-monitor aware), not only the primary monitor metrics.
@@ -85,11 +87,33 @@ Use `--config <path>` with any command to override the config location.
 
 ## How it works
 
-`hop` keeps input ownership on the server machine and forwards events over LAN to the client machine. Control messages run on an encrypted TCP channel, and input events run on encrypted UDP datagrams to minimize handoff latency. It is a network handoff model, not Bluetooth re-pairing.
+`hop` keeps an encrypted control channel over TCP for handoff coordination and clipboard sync.
+
+- In `network` mode, input ownership stays on the server and mouse/keyboard events are forwarded to the client over encrypted UDP datagrams.
+- In `logi` mode, edge handoff triggers native Logitech Easy-Switch channel changes through Logi Options+ agent IPC (equivalent to pressing Easy-Switch 1/2/3), and hop does not forward input over UDP for that handoff.
+- In `auto` mode (default), hop chooses `logi` when Options+ + Easy-Switch devices are ready; otherwise it uses `network`.
+
+If Logi switching is requested but fails or times out, hop falls back to the network handoff path for that session.
+
+### Handoff config
+
+```json
+{
+  "handoff": {
+    "mode": "auto",
+    "logi_peer_host_index": {
+      "macbook-pro": 1
+    }
+  }
+}
+```
+
+- `handoff.mode`: `auto` (default) | `logi` | `network`
+- `handoff.logi_peer_host_index`: optional explicit peer -> Easy-Switch host index map (`0` = channel 1, `1` = channel 2, `2` = channel 3). If omitted, hop auto-maps channels using Options+ Easy-Switch host names/OS hints.
 
 ### Clipboard sync (MVP)
 
-During remote ownership, `hop` also syncs clipboard changes over the encrypted control channel (TCP). This path is separate from the UDP input hot path.
+During remote ownership, `hop` also syncs clipboard changes over the encrypted control channel (TCP). This path is separate from the UDP input hot path and stays active in both `network` and `logi` handoff modes.
 
 Supported clipboard payloads:
 - Text (Unicode)
@@ -111,6 +135,7 @@ Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like password
 - Windows elevated or secure desktop surfaces (UAC/admin contexts) can block hooks or injection when privilege levels do not match.
 - Linux remains mock-only in CI; native desktop capture/injection validation is focused on macOS and Windows.
 - iOS/iPadOS are not handoff targets.
+- Logi-native handoff requires Logi Options+ agent on both machines and Logitech multi-host devices (for example MX/Casa devices with Easy-Switch channels).
 
 ## More detail
 
@@ -125,4 +150,4 @@ Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like password
 - `hop`: small CLI-first codebase focused on low-latency LAN handoff.
 - Deskflow/Synergy family: broader feature set and more mature desktop UX.
 - Logi Flow: tight Logitech ecosystem integration, but not an open protocol daemon.
-- `hop` does not attempt Bluetooth device switching; it forwards input over the network.
+- `hop` can use native Logitech Easy-Switch through Options+ when available, with network fallback always available.
