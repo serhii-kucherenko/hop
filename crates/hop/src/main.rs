@@ -37,7 +37,6 @@ const PAIRING_DISCOVERY_WAIT_MS: u64 = 800;
 )]
 struct Cli {
     /// Pairing code from the server machine (example: AB12).
-    #[arg(conflicts_with = "command")]
     code: Option<String>,
     /// Path to hop JSON config.
     #[arg(long, global = true, default_value_os_t = default_config_path())]
@@ -166,6 +165,9 @@ struct ClientPairingResult {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.code.is_some() && cli.command.is_some() {
+        bail!("pairing code cannot be combined with subcommands");
+    }
     let code = cli.code;
     let config_path = cli.config;
     let log_latency = cli.log_latency;
