@@ -8,7 +8,9 @@ use hop_protocol::auth::{
     build_client_hello, build_client_proof, build_server_challenge, derive_session_key,
     verify_client_proof, verify_server_challenge, AuthChallenge, AuthHello, AuthProof,
 };
-use hop_protocol::control::{ControlMessage, Edge, NodeRole, ScreenSize as WireScreenSize};
+use hop_protocol::control::{
+    ControlMessage, Edge, HandoffTransport, NodeRole, ScreenSize as WireScreenSize,
+};
 use hop_protocol::crypto::CipherState;
 use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
 use hop_protocol::frame::{decode_control, decode_plain, encode_control, encode_plain};
@@ -23,6 +25,7 @@ use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
     edge_for_peer_position, CursorPosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
 };
+use crate::logi::LogiHandoff;
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
 
 const STOPPED_MESSAGE: &str = "hop stopped; local input restored";
@@ -43,6 +46,7 @@ pub async fn run(
 
 async fn run_server(config: Config, stop_signal_path: Option<&Path>) -> anyhow::Result<()> {
     let mut adapters = build_platform_adapters();
+    let mut logi_handoff = LogiHandoff::from_config(&config);
     let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
@@ -93,6 +97,7 @@ async fn run_server(config: Config, stop_signal_path: Option<&Path>) -> anyhow::
         match run_server_session(
             &config,
             &mut adapters,
+            &mut logi_handoff,
             &mut clipboard_sync,
             &udp_socket,
             stream,
@@ -122,6 +127,7 @@ async fn run_client(
 ) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
+    let logi_handoff = LogiHandoff::from_config(&config);
     let swap_ctrl_cmd = config
         .local
         .swap_ctrl_cmd
@@ -218,11 +224,14 @@ async fn run_client(
 
         let mut handoff_active = false;
         let mut owner_machine = peer.machine_name.clone();
+        let mut active_transport = HandoffTransport::Network;
         let mut reconnect_required = false;
         let mut clipboard_ticker = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
         clipboard_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut session_stop_ticker = tokio::time::interval(Duration::from_millis(200));
         session_stop_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut logi_return_ticker = tokio::time::interval(Duration::from_millis(8));
+        logi_return_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         while !reconnect_required {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -242,6 +251,7 @@ async fn run_client(
                         Err(error) => {
                             eprintln!("control channel read failed: {error}; reconnecting");
                             handoff_active = false;
+                            active_transport = HandoffTransport::Network;
                             reconnect_required = true;
                             continue;
                         }
@@ -251,15 +261,29 @@ async fn run_client(
                             from_machine,
                             to_machine,
                             edge,
+                            transport,
                         } => {
-                            let accepted = to_machine == config.local.machine_name;
+                            let accepted = if to_machine != config.local.machine_name {
+                                false
+                            } else if matches!(transport, HandoffTransport::Logi) {
+                                logi_handoff.can_accept_logi_from(&from_machine)
+                            } else {
+                                true
+                            };
                             let reason = if accepted {
                                 None
-                            } else {
+                            } else if to_machine != config.local.machine_name {
                                 Some(format!(
                                     "handoff target {} does not match {}",
                                     to_machine, config.local.machine_name
                                 ))
+                            } else if matches!(transport, HandoffTransport::Logi) {
+                                Some(format!(
+                                    "logi handoff unavailable for owner {}",
+                                    from_machine
+                                ))
+                            } else {
+                                Some("handoff not accepted".to_owned())
                             };
                             let ack = ControlMessage::HandoffStartAck {
                                 from_machine: config.local.machine_name.clone(),
@@ -270,19 +294,22 @@ async fn run_client(
                             if let Err(error) = send_control_message(&mut stream, &mut cipher, &ack).await {
                                 eprintln!("failed to send handoff ACK: {error}; reconnecting");
                                 handoff_active = false;
+                                active_transport = HandoffTransport::Network;
                                 reconnect_required = true;
                                 continue;
                             }
                             if accepted {
                                 handoff_active = true;
+                                active_transport = transport;
                                 owner_machine = from_machine.clone();
                                 return_edge_detector.reset();
                                 println!(
-                                    "handoff begin: from={} to={} edge={:?}; enabling client injection",
-                                    from_machine, to_machine, edge
+                                    "handoff begin: from={} to={} edge={:?} transport={:?}",
+                                    from_machine, to_machine, edge, transport
                                 );
                             } else {
                                 handoff_active = false;
+                                active_transport = HandoffTransport::Network;
                                 return_edge_detector.reset();
                                 println!(
                                     "handoff start rejected: from={} to={} edge={:?}; reason={}",
@@ -295,6 +322,7 @@ async fn run_client(
                         }
                         ControlMessage::HandoffEnd { owner_machine } => {
                             handoff_active = false;
+                            active_transport = HandoffTransport::Network;
                             return_edge_detector.reset();
                             println!("handoff end: owner={owner_machine}; disabling client injection");
                         }
@@ -303,6 +331,7 @@ async fn run_client(
                             if let Err(error) = send_control_message(&mut stream, &mut cipher, &pong).await {
                                 eprintln!("failed to reply with pong: {error}; reconnecting");
                                 handoff_active = false;
+                                active_transport = HandoffTransport::Network;
                                 reconnect_required = true;
                             }
                         }
@@ -323,6 +352,63 @@ async fn run_client(
                             eprintln!("failed to send clipboard sync: {error}; reconnecting");
                             reconnect_required = true;
                             handoff_active = false;
+                            active_transport = HandoffTransport::Network;
+                            continue;
+                        }
+                    }
+                }
+                _ = logi_return_ticker.tick(), if handoff_active && matches!(active_transport, HandoffTransport::Logi) => {
+                    let cursor = match adapters.input_capture.poll_cursor_position() {
+                        Ok(Some(cursor)) => cursor,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            eprintln!("failed to poll cursor for logi return edge: {error}");
+                            continue;
+                        }
+                    };
+                    let events = match adapters.input_capture.poll_input_events() {
+                        Ok(events) => events,
+                        Err(error) => {
+                            eprintln!("failed to poll input events for logi return edge: {error}");
+                            continue;
+                        }
+                    };
+                    let mut should_release = false;
+                    for event in &events {
+                        if return_edge_detector.should_release(cursor, local_screen, event) {
+                            should_release = true;
+                            break;
+                        }
+                    }
+                    if !should_release {
+                        continue;
+                    }
+
+                    if let Err(error) = logi_handoff.switch_to_peer(&owner_machine) {
+                        eprintln!(
+                            "logi return switch failed for owner {}: {}",
+                            owner_machine, error
+                        );
+                    }
+
+                    let handoff_end = ControlMessage::HandoffEnd {
+                        owner_machine: owner_machine.clone(),
+                    };
+                    match send_control_message(&mut stream, &mut cipher, &handoff_end).await {
+                        Ok(()) => {
+                            handoff_active = false;
+                            active_transport = HandoffTransport::Network;
+                            return_edge_detector.reset();
+                            println!(
+                                "handoff end sent from client on {:?} return edge (logi)",
+                                return_edge
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("failed to send handoff end: {error}; reconnecting");
+                            handoff_active = false;
+                            active_transport = HandoffTransport::Network;
+                            reconnect_required = true;
                             continue;
                         }
                     }
@@ -341,7 +427,7 @@ async fn run_client(
                     let payload = &datagram_buffer[..len];
                     match decode_datagram(&mut cipher, payload) {
                         Ok(message) => {
-                            if !handoff_active {
+                            if !handoff_active || !matches!(active_transport, HandoffTransport::Network) {
                                 continue;
                             }
 
@@ -359,6 +445,7 @@ async fn run_client(
                                     match send_control_message(&mut stream, &mut cipher, &handoff_end).await {
                                         Ok(()) => {
                                             handoff_active = false;
+                                            active_transport = HandoffTransport::Network;
                                             return_edge_detector.reset();
                                             println!(
                                                 "handoff end sent from client on {:?} return edge",
@@ -369,6 +456,7 @@ async fn run_client(
                                         Err(error) => {
                                             eprintln!("failed to send handoff end: {error}; reconnecting");
                                             handoff_active = false;
+                                            active_transport = HandoffTransport::Network;
                                             reconnect_required = true;
                                             continue;
                                         }
@@ -415,6 +503,7 @@ async fn run_client(
 async fn run_server_session(
     config: &Config,
     adapters: &mut crate::platform::PlatformAdapters,
+    logi_handoff: &mut LogiHandoff,
     clipboard_sync: &mut ClipboardSync,
     udp_socket: &UdpSocket,
     mut stream: TcpStream,
@@ -454,6 +543,7 @@ async fn run_server_session(
 
     let mut handoff = HandoffController::new(config.local.machine_name.clone());
     let mut handoff_committed = false;
+    let mut active_transport = HandoffTransport::Network;
     let mut cursor_hidden = false;
     let mut ticker = tokio::time::interval(Duration::from_millis(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -499,35 +589,24 @@ async fn run_server_session(
                         edge,
                     } = action
                     {
-                        let message = ControlMessage::HandoffStart {
-                            from_machine: config.local.machine_name.clone(),
-                            to_machine: target_machine.clone(),
-                            edge,
-                        };
-                        if let Err(error) = send_control_message(&mut stream, &mut cipher, &message).await {
-                            recover_server_focus_local(
-                                &mut handoff,
-                                adapters.input_capture.as_mut(),
-                                adapters.cursor_controller.as_mut(),
-                                &mut cursor_hidden,
-                                local_screen,
-                                &format!("failed to send handoff start: {error}"),
-                            );
-                            return Err(error);
-                        }
+                        let requested_transport =
+                            logi_handoff.preferred_transport_for_peer(&target_machine);
                         println!(
-                            "handoff begin requested: from={} to={} edge={:?}",
-                            config.local.machine_name, target_machine, edge
+                            "handoff begin requested: from={} to={} edge={:?} transport={:?}",
+                            config.local.machine_name, target_machine, edge, requested_transport
                         );
 
-                        let ack_result = await_handoff_start_ack(
+                        let mut committed_transport = requested_transport;
+                        let mut ack_status = match request_handoff_start(
                             &mut stream,
                             &mut cipher,
+                            &config.local.machine_name,
                             &target_machine,
-                            Duration::from_millis(150),
+                            edge,
+                            requested_transport,
                         )
-                        .await;
-                        let ack_status = match ack_result {
+                        .await
+                        {
                             Ok(status) => status,
                             Err(error) => {
                                 recover_server_focus_local(
@@ -536,11 +615,56 @@ async fn run_server_session(
                                     adapters.cursor_controller.as_mut(),
                                     &mut cursor_hidden,
                                     local_screen,
-                                    &format!("failed while waiting for handoff ack: {error}"),
+                                    &format!("failed while requesting handoff start: {error}"),
                                 );
                                 return Err(error);
                             }
                         };
+
+                        if matches!(requested_transport, HandoffTransport::Logi) {
+                            let mut fallback_reason = None;
+                            if matches!(ack_status, HandoffStartAckStatus::Accepted) {
+                                if let Err(error) = logi_handoff.switch_to_peer(&target_machine) {
+                                    fallback_reason = Some(format!(
+                                        "logi switch failed: {error}; retrying with network transport"
+                                    ));
+                                }
+                            } else {
+                                fallback_reason = Some(format!(
+                                    "logi handoff not accepted ({ack_status:?}); retrying with network transport"
+                                ));
+                            }
+
+                            if let Some(reason) = fallback_reason {
+                                eprintln!("{reason}");
+                                committed_transport = HandoffTransport::Network;
+                                ack_status = match request_handoff_start(
+                                    &mut stream,
+                                    &mut cipher,
+                                    &config.local.machine_name,
+                                    &target_machine,
+                                    edge,
+                                    HandoffTransport::Network,
+                                )
+                                .await
+                                {
+                                    Ok(status) => status,
+                                    Err(error) => {
+                                        recover_server_focus_local(
+                                            &mut handoff,
+                                            adapters.input_capture.as_mut(),
+                                            adapters.cursor_controller.as_mut(),
+                                            &mut cursor_hidden,
+                                            local_screen,
+                                            &format!(
+                                                "failed while requesting network fallback handoff: {error}"
+                                            ),
+                                        );
+                                        return Err(error);
+                                    }
+                                };
+                            }
+                        }
 
                         match ack_status {
                             HandoffStartAckStatus::Accepted => {
@@ -554,6 +678,7 @@ async fn run_server_session(
                                         &format!("failed to enable remote input capture: {error}"),
                                     );
                                     handoff_committed = false;
+                                    active_transport = HandoffTransport::Network;
                                     send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
                                     continue;
                                 }
@@ -567,6 +692,7 @@ async fn run_server_session(
                                         &format!("failed to hide cursor after handoff ack: {error}"),
                                     );
                                     handoff_committed = false;
+                                    active_transport = HandoffTransport::Network;
                                     send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
                                     continue;
                                 }
@@ -584,13 +710,15 @@ async fn run_server_session(
                                         &format!("failed to warp cursor after handoff ack: {error}"),
                                     );
                                     handoff_committed = false;
+                                    active_transport = HandoffTransport::Network;
                                     send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
                                     continue;
                                 }
                                 handoff_committed = true;
+                                active_transport = committed_transport;
                                 println!(
-                                    "handoff begin confirmed: from={} to={} edge={:?}",
-                                    config.local.machine_name, target_machine, edge
+                                    "handoff begin confirmed: from={} to={} edge={:?} transport={:?}",
+                                    config.local.machine_name, target_machine, edge, committed_transport
                                 );
                             }
                             HandoffStartAckStatus::Rejected(reason) => {
@@ -604,6 +732,7 @@ async fn run_server_session(
                                     &format!("handoff ack rejected: {reason}"),
                                 );
                                 handoff_committed = false;
+                                active_transport = HandoffTransport::Network;
                                 send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
                             }
                             HandoffStartAckStatus::TimedOut => {
@@ -616,13 +745,17 @@ async fn run_server_session(
                                     "handoff ack timed out",
                                 );
                                 handoff_committed = false;
+                                active_transport = HandoffTransport::Network;
                                 send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
                             }
                         }
                     }
                 }
 
-                if handoff_committed && matches!(handoff.focus_state(), FocusState::Remote { .. }) {
+                if handoff_committed
+                    && matches!(handoff.focus_state(), FocusState::Remote { .. })
+                    && matches!(active_transport, HandoffTransport::Network)
+                {
                     for event in pending_events {
                         let datagram = InputDatagram {
                             event,
@@ -679,6 +812,7 @@ async fn run_server_session(
                                 "handoff ended by remote peer",
                             );
                             handoff_committed = false;
+                            active_transport = HandoffTransport::Network;
                         } else {
                             println!("handoff end ignored for owner {owner_machine}");
                         }
@@ -733,10 +867,29 @@ struct ServerSessionParams<'a> {
     stop_signal_path: Option<&'a Path>,
 }
 
+#[derive(Debug)]
 enum HandoffStartAckStatus {
     Accepted,
     Rejected(Option<String>),
     TimedOut,
+}
+
+async fn request_handoff_start(
+    stream: &mut TcpStream,
+    cipher: &mut CipherState,
+    from_machine: &str,
+    target_machine: &str,
+    edge: Edge,
+    transport: HandoffTransport,
+) -> anyhow::Result<HandoffStartAckStatus> {
+    let message = ControlMessage::HandoffStart {
+        from_machine: from_machine.to_owned(),
+        to_machine: target_machine.to_owned(),
+        edge,
+        transport,
+    };
+    send_control_message(stream, cipher, &message).await?;
+    await_handoff_start_ack(stream, cipher, target_machine, Duration::from_millis(150)).await
 }
 
 async fn await_handoff_start_ack(

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -11,6 +12,8 @@ use crate::layout::RelativePosition;
 pub struct Config {
     pub local: LocalConfig,
     pub peers: Vec<PeerConfig>,
+    #[serde(default)]
+    pub handoff: HandoffConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -32,6 +35,23 @@ pub struct PeerConfig {
     pub control_addr: String,
     pub data_addr: String,
     pub position: RelativePosition,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct HandoffConfig {
+    #[serde(default)]
+    pub mode: HandoffMode,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub logi_peer_host_index: HashMap<String, u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HandoffMode {
+    #[default]
+    Auto,
+    Logi,
+    Network,
 }
 
 impl Config {
@@ -100,5 +120,74 @@ impl Config {
             }
         }
         fs::write(path, raw).with_context(|| format!("failed to write config: {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_mode_defaults_to_auto_when_omitted() {
+        let parsed: Config = serde_json::from_str(
+            r#"{
+                "local": {
+                    "machine_name": "nucbox",
+                    "role": "server",
+                    "control_bind": "0.0.0.0:4600",
+                    "data_bind": "0.0.0.0:4601",
+                    "shared_secret": "0123456789abcdef",
+                    "screen_width": 1920,
+                    "screen_height": 1080
+                },
+                "peers": [
+                    {
+                        "machine_name": "macbook",
+                        "control_addr": "192.168.1.2:4600",
+                        "data_addr": "192.168.1.2:4601",
+                        "position": "right"
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(parsed.handoff.mode, HandoffMode::Auto);
+        assert!(parsed.handoff.logi_peer_host_index.is_empty());
+    }
+
+    #[test]
+    fn handoff_mode_and_logi_map_parse_from_json() {
+        let parsed: Config = serde_json::from_str(
+            r#"{
+                "local": {
+                    "machine_name": "nucbox",
+                    "role": "server",
+                    "control_bind": "0.0.0.0:4600",
+                    "data_bind": "0.0.0.0:4601",
+                    "shared_secret": "0123456789abcdef",
+                    "screen_width": 1920,
+                    "screen_height": 1080
+                },
+                "peers": [
+                    {
+                        "machine_name": "macbook",
+                        "control_addr": "192.168.1.2:4600",
+                        "data_addr": "192.168.1.2:4601",
+                        "position": "right"
+                    }
+                ],
+                "handoff": {
+                    "mode": "logi",
+                    "logi_peer_host_index": {
+                        "macbook": 1
+                    }
+                }
+            }"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(parsed.handoff.mode, HandoffMode::Logi);
+        assert_eq!(parsed.handoff.logi_peer_host_index.get("macbook"), Some(&1));
     }
 }

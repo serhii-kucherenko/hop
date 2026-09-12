@@ -119,3 +119,33 @@ Q. Bench command sanity:
 - With peer daemon running, execute `hop bench`.
 - Expected: p50/p95 one-way and RTT values are printed against 1-3ms goal and 5ms hard max.
 - If using wired LAN and `--strict`, command should fail when p95 one-way exceeds 5ms.
+
+Additional hybrid handoff cases (Logi Options+ + Easy-Switch):
+
+R. Auto mode chooses Logi path when available:
+- Set `handoff.mode` to `auto`.
+- Ensure Logi Options+ agent is running on both machines and paired MX/Casa keyboard+mouse are visible in Options+.
+- With Mac hop online, push into Windows right edge (Mac on right).
+- Expected: devices switch to the Mac Easy-Switch host, and hop does not require UDP input forwarding for that handoff.
+- With Mac hop offline/off: same edge push must do nothing (no channel switch).
+
+S. Return edge switches back to owner channel:
+- While on Mac in Logi handoff, push into Mac left edge (return to Windows).
+- Expected: client sends handoff end and switches devices back to Windows/owner channel.
+- Expected: server regains local ownership cleanly.
+- With Windows hop offline: Mac left-edge return must do nothing.
+
+T. Logi failure fallback:
+- Keep `handoff.mode` as `auto` or `logi`, then stop Options+ agent on one side (or use a device without Easy-Switch).
+- Trigger handoff with peer still online.
+- Expected: hop falls back to existing network handoff behavior (A/B still pass).
+
+U. Network-only mode bypasses Logi:
+- Set `handoff.mode` to `network` with Options+ still running.
+- Trigger handoff.
+- Expected: behavior matches existing UDP forwarding path; no native channel switch is attempted.
+
+V. Doctor/onboarding detection summary:
+- Run `hop doctor`.
+- Run fresh onboarding (`hop` on server then `hop <code>` on client).
+- Expected: summary includes OS, hostname, role hint, screen geometry, Options+ presence, detected Easy-Switch devices, and peer->channel mapping.
