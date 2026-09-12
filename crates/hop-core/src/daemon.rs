@@ -500,6 +500,7 @@ async fn run_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server_session(
     config: &Config,
     adapters: &mut crate::platform::PlatformAdapters,
