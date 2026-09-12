@@ -187,7 +187,8 @@ fn sticky_handoff_supports_left_top_and_bottom_edges() {
             position,
         }]);
         let mut controller = HandoffController::new("macbook-pro");
-        let action = controller.on_local_cursor(cursor, screen, &layout, &[push.clone()]);
+        let action =
+            controller.on_local_cursor(cursor, screen, &layout, std::slice::from_ref(&push));
         assert_eq!(action, HandoffAction::None);
 
         let action = controller.on_local_cursor(cursor, screen, &layout, &[push]);
