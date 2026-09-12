@@ -144,9 +144,37 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
         peer.control_addr, config.local.data_bind
     );
 
-    let mut stream = TcpStream::connect(&peer.control_addr)
-        .await
-        .with_context(|| format!("failed to connect to server {}", peer.control_addr))?;
+    let mut stream = {
+        let mut connected = None;
+        let mut last_error = None;
+        for attempt in 1..=20 {
+            match TcpStream::connect(&peer.control_addr).await {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 20 {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+        match connected {
+            Some(stream) => stream,
+            None => {
+                let error = last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "failed to connect to server {}: {}",
+                    peer.control_addr,
+                    error
+                );
+            }
+        }
+    };
     let udp_port = parse_port(&config.local.data_bind)?;
     let (_hello, mut cipher) = complete_client_auth(
         &mut stream,

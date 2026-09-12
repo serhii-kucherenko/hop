@@ -8,8 +8,6 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use clap::{Parser, ValueEnum};
 use hop_core::config::{Config, LocalConfig, PeerConfig};
 use hop_core::daemon;
@@ -19,13 +17,18 @@ use hop_protocol::control::NodeRole;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket as TokioUdpSocket};
 use tokio::time::timeout;
 
 const DEFAULT_CONTROL_PORT: u16 = 4600;
 const DEFAULT_DATA_PORT: u16 = 4601;
+const DEFAULT_PAIRING_PORT: u16 = 4602;
 const DEFAULT_SCREEN_WIDTH: u32 = 1920;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1080;
+const PAIRING_CODE_LENGTH: usize = 4;
+const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const PAIRING_DISCOVERY_ATTEMPTS: usize = 10;
+const PAIRING_DISCOVERY_WAIT_MS: u64 = 800;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,32 +36,31 @@ const DEFAULT_SCREEN_HEIGHT: u32 = 1080;
     about = "hop daemon for cross-machine mouse and keyboard handoff"
 )]
 struct Cli {
+    /// Pairing code from the server machine (example: AB12).
+    code: Option<String>,
+    /// Path to hop JSON config.
+    #[arg(long, global = true, default_value_os_t = default_config_path())]
+    config: PathBuf,
+    /// Print one-way latency estimates at the client side.
+    #[arg(long, global = true, default_value_t = false)]
+    log_latency: bool,
+    /// Open permission settings when a blocker is detected.
+    #[arg(long, global = true, default_value_t = false)]
+    open_permissions: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
     /// Start the daemon in either server or client mode.
     Run {
-        /// Path to hop JSON config.
-        #[arg(long, default_value = "hop.json")]
-        config: PathBuf,
         /// Override role from the config.
         #[arg(long)]
         role: Option<RoleArg>,
-        /// Print one-way latency estimates at the client side.
-        #[arg(long, default_value_t = false)]
-        log_latency: bool,
-        /// Open permission settings when a blocker is detected.
-        #[arg(long, default_value_t = false)]
-        open_permissions: bool,
     },
     /// Create a local hop config with sensible defaults.
     Init {
-        /// Path to hop JSON config.
-        #[arg(long, default_value = "hop.json")]
-        config: PathBuf,
         /// Role for this machine.
         #[arg(long)]
         role: Option<RoleArg>,
@@ -74,12 +76,9 @@ enum Commands {
     },
     /// Print pairing code (server) or consume pairing code (client).
     Pair {
-        /// Path to hop JSON config.
-        #[arg(long, default_value = "hop.json")]
-        config: PathBuf,
         /// Pairing code copied from the server.
         code: Option<String>,
-        /// Override host from pairing code.
+        /// Override server host for discovery.
         #[arg(long)]
         host: Option<String>,
         /// Override client position on server when generating pairing code.
@@ -90,9 +89,6 @@ enum Commands {
     Join {
         /// Server host or host:port.
         host: String,
-        /// Path to hop JSON config.
-        #[arg(long, default_value = "hop.json")]
-        config: PathBuf,
         /// Shared secret from the server.
         #[arg(long)]
         secret: Option<String>,
@@ -108,15 +104,9 @@ enum Commands {
     },
     /// Run onboarding checks and report hard blockers.
     Doctor {
-        /// Path to hop JSON config.
-        #[arg(long, default_value = "hop.json")]
-        config: PathBuf,
         /// Reachability timeout for peer control check.
         #[arg(long, default_value_t = 800)]
         timeout_ms: u64,
-        /// Open permission settings when a blocker is detected.
-        #[arg(long, default_value_t = false)]
-        open_permissions: bool,
     },
     /// Reserved command for future network latency benchmarks.
     Bench,
@@ -137,8 +127,33 @@ enum PositionArg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PairingPayload {
+struct PairingDiscoveryRequest {
     version: u8,
+    code: String,
+    client_machine_name: String,
+    client_control_port: u16,
+    client_data_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PairingDiscoveryResponse {
+    version: u8,
+    code: String,
+    server_machine_name: String,
+    control_port: u16,
+    data_port: u16,
+    shared_secret: String,
+    client_position: RelativePosition,
+}
+
+struct ServerPairingResult {
+    client_machine_name: String,
+    client_host: String,
+    client_control_port: u16,
+    client_data_port: u16,
+}
+
+struct ClientPairingResult {
     server_machine_name: String,
     server_host: String,
     control_port: u16,
@@ -150,62 +165,82 @@ struct PairingPayload {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.code.is_some() && cli.command.is_some() {
+        bail!("pairing code cannot be combined with subcommands");
+    }
+    let code = cli.code;
+    let config_path = cli.config;
+    let log_latency = cli.log_latency;
+    let open_permissions = cli.open_permissions;
 
     match cli.command {
-        Commands::Run {
-            config,
-            role,
-            log_latency,
-            open_permissions,
-        } => {
+        Some(Commands::Run { role }) => {
             print_run_permission_hints(open_permissions)?;
-            let config = Config::from_json_path(&config)?;
+            let config = Config::from_json_path(&config_path)?;
             let override_role = role.map(|role| match role {
                 RoleArg::Server => NodeRole::Server,
                 RoleArg::Client => NodeRole::Client,
             });
             daemon::run(config, override_role, log_latency).await?;
         }
-        Commands::Init {
-            config,
+        Some(Commands::Init {
             role,
             peer,
             position,
             force,
-        } => {
-            run_init(&config, role, peer, position, force)?;
+        }) => {
+            run_init(&config_path, role, peer, position, force)?;
         }
-        Commands::Pair {
-            config,
+        Some(Commands::Pair {
             code,
             host,
             position,
-        } => {
+        }) => {
             if let Some(code) = code {
-                run_pair_client(&config, &code, host)?;
+                run_pair_client(&config_path, &code, host).await?;
+                println!("next: hop --config {}", config_path.display());
             } else {
-                run_pair_server(&config, position)?;
+                run_pair_server(&config_path, position).await?;
+                println!("next: hop --config {}", config_path.display());
             }
         }
-        Commands::Join {
+        Some(Commands::Join {
             host,
-            config,
             secret,
             control_port,
             data_port,
             position,
-        } => {
-            run_join(&config, &host, secret, control_port, data_port, position)?;
+        }) => {
+            run_join(
+                &config_path,
+                &host,
+                secret,
+                control_port,
+                data_port,
+                position,
+            )?;
+            println!("next: hop --config {}", config_path.display());
         }
-        Commands::Doctor {
-            config,
-            timeout_ms,
-            open_permissions,
-        } => {
-            run_doctor(&config, timeout_ms, open_permissions).await?;
+        Some(Commands::Doctor { timeout_ms }) => {
+            run_doctor(&config_path, timeout_ms, open_permissions).await?;
         }
-        Commands::Bench => {
+        Some(Commands::Bench) => {
             println!("bench hook: reserved for future probes against 1-3ms goal and 5ms hard max");
+        }
+        None => {
+            if let Some(code) = code {
+                let config = run_pair_client(&config_path, &code, None).await?;
+                print_run_permission_hints(true)?;
+                daemon::run(config, Some(NodeRole::Client), log_latency).await?;
+            } else if config_path.exists() {
+                print_run_permission_hints(true)?;
+                let config = Config::from_json_path(&config_path)?;
+                daemon::run(config, None, log_latency).await?;
+            } else {
+                let config = run_pair_server(&config_path, None).await?;
+                print_run_permission_hints(true)?;
+                daemon::run(config, Some(NodeRole::Server), log_latency).await?;
+            }
         }
     }
 
@@ -270,85 +305,103 @@ fn run_init(
     Ok(())
 }
 
-fn run_pair_server(config_path: &Path, position: Option<PositionArg>) -> anyhow::Result<()> {
-    let mut config = Config::from_json_path_unvalidated(config_path)?;
-    if config.local.role != NodeRole::Server {
-        bail!("hop pair (without code) requires local.role=server");
+async fn run_pair_server(
+    config_path: &Path,
+    position: Option<PositionArg>,
+) -> anyhow::Result<Config> {
+    let mut config = load_or_create_config(config_path, NodeRole::Server);
+    config.local.role = NodeRole::Server;
+    if config.local.shared_secret.trim().len() < 16 {
+        config.local.shared_secret = generate_shared_secret();
     }
 
     let chosen_position = position
         .map(position_to_relative)
         .or_else(|| config.peers.first().map(|peer| peer.position))
         .unwrap_or(RelativePosition::Right);
-
     if config.peers.is_empty() {
         config.peers.push(build_server_peer(None, chosen_position)?);
     } else if let Some(first_peer) = config.peers.first_mut() {
         first_peer.position = chosen_position;
     }
-    config.write_json_path(config_path)?;
 
     let control_port = parse_port(&config.local.control_bind)
         .with_context(|| format!("invalid control bind {}", config.local.control_bind))?;
     let data_port = parse_port(&config.local.data_bind)
         .with_context(|| format!("invalid data bind {}", config.local.data_bind))?;
-    let lan_ips = detect_lan_ips();
-    let server_host = lan_ips
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_owned());
-
-    let payload = PairingPayload {
-        version: 1,
-        server_machine_name: config.local.machine_name.clone(),
-        server_host: server_host.clone(),
-        control_port,
-        data_port,
-        shared_secret: config.local.shared_secret.clone(),
-        client_position: chosen_position,
-    };
-    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
-    let code = format!("hop1.{encoded}");
+    let code = generate_pairing_code();
 
     println!("pair code: {code}");
     println!("lan addresses:");
+    let lan_ips = detect_lan_ips();
     for ip in &lan_ips {
         println!("  - {ip}");
     }
     if lan_ips.is_empty() {
-        println!("  - (no LAN address detected; use --host on the client)");
+        println!("  - (no LAN address detected)");
     }
+    println!("on the other machine, run: hop {code}");
+    println!("waiting for peer pairing request...");
+
+    let pair_result = wait_for_pairing_client(
+        &code,
+        &config.local.machine_name,
+        control_port,
+        data_port,
+        &config.local.shared_secret,
+        chosen_position,
+    )
+    .await?;
+
+    config.peers = vec![PeerConfig {
+        machine_name: pair_result.client_machine_name.clone(),
+        control_addr: format_host_port(&pair_result.client_host, pair_result.client_control_port),
+        data_addr: format_host_port(&pair_result.client_host, pair_result.client_data_port),
+        position: chosen_position,
+    }];
+    config.write_json_path(config_path)?;
+
     println!(
-        "on the client, run: hop pair {code} --config {}",
-        config_path.display()
+        "paired with {} ({})",
+        pair_result.client_machine_name, pair_result.client_host
     );
-    println!("trust model: pairing code is LAN-only and should be treated like a password.");
-    Ok(())
+    println!("updated {}", config_path.display());
+    Ok(config)
 }
 
-fn run_pair_client(
+async fn run_pair_client(
     config_path: &Path,
     code: &str,
     host_override: Option<String>,
-) -> anyhow::Result<()> {
-    let payload = decode_pairing_code(code)?;
-    let host = host_override.unwrap_or(payload.server_host);
+) -> anyhow::Result<Config> {
+    let normalized_code = normalize_pairing_code(code)?;
     let mut config = load_or_create_config(config_path, NodeRole::Client);
-    let server_position = invert_position(payload.client_position);
     config.local.role = NodeRole::Client;
-    config.local.shared_secret = payload.shared_secret;
+    let local_control_port = parse_port(&config.local.control_bind)
+        .with_context(|| format!("invalid control bind {}", config.local.control_bind))?;
+    let local_data_port = parse_port(&config.local.data_bind)
+        .with_context(|| format!("invalid data bind {}", config.local.data_bind))?;
+
+    let pair_result = discover_pairing_server(
+        &normalized_code,
+        host_override.as_deref(),
+        &config.local.machine_name,
+        local_control_port,
+        local_data_port,
+    )
+    .await?;
+    let server_position = invert_position(pair_result.client_position);
+    config.local.shared_secret = pair_result.shared_secret;
     config.peers = vec![PeerConfig {
-        machine_name: payload.server_machine_name,
-        control_addr: format_host_port(&host, payload.control_port),
-        data_addr: format_host_port(&host, payload.data_port),
+        machine_name: pair_result.server_machine_name,
+        control_addr: format_host_port(&pair_result.server_host, pair_result.control_port),
+        data_addr: format_host_port(&pair_result.server_host, pair_result.data_port),
         position: server_position,
     }];
     config.write_json_path(config_path)?;
 
     println!("paired and updated {}", config_path.display());
-    println!("next: hop doctor --config {}", config_path.display());
-    println!("then: hop run --config {}", config_path.display());
-    Ok(())
+    Ok(config)
 }
 
 fn run_join(
@@ -380,8 +433,6 @@ fn run_join(
     config.write_json_path(config_path)?;
 
     println!("joined server and updated {}", config_path.display());
-    println!("next: hop doctor --config {}", config_path.display());
-    println!("then: hop run --config {}", config_path.display());
     Ok(())
 }
 
@@ -396,7 +447,7 @@ async fn run_doctor(
     println!("hop doctor");
     if !config_path.exists() {
         blockers.push(format!(
-            "config missing: {} (run `hop init` first)",
+            "config missing: {} (run `hop` on the server, then `hop <code>` on the client)",
             config_path.display()
         ));
     }
@@ -460,7 +511,10 @@ async fn run_doctor(
         }
 
         if config.peers.is_empty() {
-            blockers.push("no peers configured (run `hop pair` or `hop join`)".to_owned());
+            blockers.push(
+                "no peers configured (pair with `hop` + `hop <code>`, or use `hop join`)"
+                    .to_owned(),
+            );
         } else if config.local.role == NodeRole::Client {
             let peer = &config.peers[0];
             if peer.control_addr.trim().is_empty() {
@@ -576,6 +630,37 @@ fn detect_machine_name() -> String {
     "hop-machine".to_owned()
 }
 
+fn default_config_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return PathBuf::from(appdata).join("hop").join("config.json");
+        }
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            return PathBuf::from(user_profile)
+                .join("AppData")
+                .join("Roaming")
+                .join("hop")
+                .join("config.json");
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
+            return PathBuf::from(xdg_config).join("hop").join("config.json");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join(".config")
+                .join("hop")
+                .join("config.json");
+        }
+    }
+
+    PathBuf::from("hop.json")
+}
+
 fn generate_shared_secret() -> String {
     let mut bytes = [0_u8; 24];
     OsRng.fill_bytes(&mut bytes);
@@ -648,22 +733,160 @@ fn build_client_peer(peer: Option<&str>, position: RelativePosition) -> anyhow::
     })
 }
 
-fn decode_pairing_code(code: &str) -> anyhow::Result<PairingPayload> {
-    let payload = code
-        .strip_prefix("hop1.")
-        .ok_or_else(|| anyhow::anyhow!("invalid code prefix"))?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(payload.as_bytes())
-        .context("failed to decode pairing code")?;
-    let parsed: PairingPayload =
-        serde_json::from_slice(&bytes).context("failed to parse pairing code payload")?;
-    if parsed.version != 1 {
-        bail!("unsupported pairing code version {}", parsed.version);
+fn generate_pairing_code() -> String {
+    let mut out = String::with_capacity(PAIRING_CODE_LENGTH);
+    for _ in 0..PAIRING_CODE_LENGTH {
+        let index = (OsRng.next_u32() as usize) % PAIRING_CODE_ALPHABET.len();
+        out.push(PAIRING_CODE_ALPHABET[index] as char);
     }
-    if parsed.shared_secret.trim().len() < 16 {
-        bail!("pairing code contains weak shared secret");
+    out
+}
+
+fn normalize_pairing_code(code: &str) -> anyhow::Result<String> {
+    let cleaned = code
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if cleaned.len() != PAIRING_CODE_LENGTH {
+        bail!("pairing code must be {PAIRING_CODE_LENGTH} characters");
     }
-    Ok(parsed)
+    if cleaned
+        .as_bytes()
+        .iter()
+        .any(|ch| !PAIRING_CODE_ALPHABET.contains(ch))
+    {
+        bail!(
+            "pairing code may only use {}",
+            String::from_utf8_lossy(PAIRING_CODE_ALPHABET)
+        );
+    }
+    Ok(cleaned)
+}
+
+async fn wait_for_pairing_client(
+    code: &str,
+    server_machine_name: &str,
+    control_port: u16,
+    data_port: u16,
+    shared_secret: &str,
+    client_position: RelativePosition,
+) -> anyhow::Result<ServerPairingResult> {
+    let socket = TokioUdpSocket::bind(format!("0.0.0.0:{DEFAULT_PAIRING_PORT}"))
+        .await
+        .context("failed to bind pairing socket")?;
+    let mut buffer = [0_u8; 2048];
+    loop {
+        let (len, addr) = socket
+            .recv_from(&mut buffer)
+            .await
+            .context("failed to receive pairing request")?;
+        let request = match serde_json::from_slice::<PairingDiscoveryRequest>(&buffer[..len]) {
+            Ok(request) => request,
+            Err(_) => continue,
+        };
+        if request.version != 1 || request.code != code {
+            continue;
+        }
+
+        let response = PairingDiscoveryResponse {
+            version: 1,
+            code: code.to_owned(),
+            server_machine_name: server_machine_name.to_owned(),
+            control_port,
+            data_port,
+            shared_secret: shared_secret.to_owned(),
+            client_position,
+        };
+        let payload = serde_json::to_vec(&response).context("failed to encode pairing response")?;
+        socket
+            .send_to(&payload, addr)
+            .await
+            .context("failed to send pairing response")?;
+        return Ok(ServerPairingResult {
+            client_machine_name: request.client_machine_name,
+            client_host: format_ip_host(addr.ip()),
+            client_control_port: request.client_control_port,
+            client_data_port: request.client_data_port,
+        });
+    }
+}
+
+async fn discover_pairing_server(
+    code: &str,
+    host_override: Option<&str>,
+    client_machine_name: &str,
+    client_control_port: u16,
+    client_data_port: u16,
+) -> anyhow::Result<ClientPairingResult> {
+    let socket = TokioUdpSocket::bind("0.0.0.0:0")
+        .await
+        .context("failed to bind pairing discovery socket")?;
+    socket
+        .set_broadcast(host_override.is_none())
+        .context("failed to configure pairing discovery socket")?;
+
+    let (targets, forced_server_host) = if let Some(host) = host_override {
+        let (host_value, port) = parse_host_with_optional_port(host, DEFAULT_PAIRING_PORT)?;
+        (vec![format_host_port(&host_value, port)], Some(host_value))
+    } else {
+        (
+            vec![format!("255.255.255.255:{DEFAULT_PAIRING_PORT}")],
+            None,
+        )
+    };
+    let request = PairingDiscoveryRequest {
+        version: 1,
+        code: code.to_owned(),
+        client_machine_name: client_machine_name.to_owned(),
+        client_control_port,
+        client_data_port,
+    };
+    let payload = serde_json::to_vec(&request).context("failed to encode pairing request")?;
+    let mut buffer = [0_u8; 2048];
+
+    for _ in 0..PAIRING_DISCOVERY_ATTEMPTS {
+        for target in &targets {
+            socket
+                .send_to(&payload, target)
+                .await
+                .with_context(|| format!("failed to send pairing request to {target}"))?;
+        }
+
+        let received = timeout(
+            Duration::from_millis(PAIRING_DISCOVERY_WAIT_MS),
+            socket.recv_from(&mut buffer),
+        )
+        .await;
+        let (len, addr) = match received {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(error)) => return Err(error).context("failed to receive pairing response"),
+            Err(_) => continue,
+        };
+        let response = match serde_json::from_slice::<PairingDiscoveryResponse>(&buffer[..len]) {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        if response.version != 1 || response.code != code || response.shared_secret.len() < 16 {
+            continue;
+        }
+
+        let server_host = forced_server_host
+            .clone()
+            .unwrap_or_else(|| format_ip_host(addr.ip()));
+        return Ok(ClientPairingResult {
+            server_machine_name: response.server_machine_name,
+            server_host,
+            control_port: response.control_port,
+            data_port: response.data_port,
+            shared_secret: response.shared_secret,
+            client_position: response.client_position,
+        });
+    }
+
+    bail!(
+        "could not find server for code {code}; ensure both machines are on the same LAN and try again"
+    )
 }
 
 fn load_or_create_config(config_path: &Path, role: NodeRole) -> Config {
@@ -832,16 +1055,13 @@ fn prompt_line(prompt: &str) -> anyhow::Result<String> {
 fn print_next_steps_after_init(config_path: &Path, role: NodeRole, has_peer: bool) {
     match role {
         NodeRole::Server => {
-            println!("next: hop pair --config {}", config_path.display());
-            println!("then: hop doctor --config {}", config_path.display());
-            println!("then: hop run --config {}", config_path.display());
+            println!("next: hop --config {}", config_path.display());
         }
         NodeRole::Client => {
             if has_peer {
-                println!("next: hop doctor --config {}", config_path.display());
-                println!("then: hop run --config {}", config_path.display());
+                println!("next: hop --config {}", config_path.display());
             } else {
-                println!("next: hop pair <code> --config {}", config_path.display());
+                println!("next: hop <code> --config {}", config_path.display());
                 println!(
                     "or:   hop join <server-host> --secret <secret> --config {}",
                     config_path.display()
@@ -875,27 +1095,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pairing_code_roundtrip() {
-        let payload = PairingPayload {
-            version: 1,
-            server_machine_name: "macbook".to_owned(),
-            server_host: "192.168.1.40".to_owned(),
-            control_port: 4600,
-            data_port: 4601,
-            shared_secret: "0123456789abcdef0123456789abcdef".to_owned(),
-            client_position: RelativePosition::Right,
-        };
-        let encoded = format!(
-            "hop1.{}",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("encode"))
-        );
-        let decoded = decode_pairing_code(&encoded).expect("decode");
-        assert_eq!(decoded.server_machine_name, payload.server_machine_name);
-        assert_eq!(decoded.server_host, payload.server_host);
-        assert_eq!(decoded.control_port, payload.control_port);
-        assert_eq!(decoded.data_port, payload.data_port);
-        assert_eq!(decoded.shared_secret, payload.shared_secret);
-        assert_eq!(decoded.client_position, payload.client_position);
+    fn pairing_code_generation_is_unambiguous() {
+        let code = generate_pairing_code();
+        assert_eq!(code.len(), PAIRING_CODE_LENGTH);
+        assert!(code
+            .as_bytes()
+            .iter()
+            .all(|ch| PAIRING_CODE_ALPHABET.contains(ch)));
+    }
+
+    #[test]
+    fn pairing_code_normalization_rejects_ambiguous_characters() {
+        let normalized = normalize_pairing_code("ab-23").expect("normalize");
+        assert_eq!(normalized, "AB23");
+
+        let error = normalize_pairing_code("A10O").expect_err("invalid");
+        assert!(error.to_string().contains("pairing code may only use"));
     }
 
     #[test]

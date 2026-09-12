@@ -21,57 +21,33 @@ cd hop
 cargo build --release -p hop
 ```
 
-2. On the machine that owns keyboard/mouse first (server):
+2. On the machine that owns keyboard/mouse first (server), run:
 
 ```bash
-hop init --role server
-hop pair
+hop
 ```
 
-`hop pair` prints a LAN-only pairing code and LAN IP list.
+If this machine is not configured yet, `hop` becomes the server, creates a shared secret, prints a short pairing code plus LAN IPs, waits for a peer, then starts handoff automatically.
 
-3. On the second machine (client):
+3. On the second machine (client), run:
 
 ```bash
-hop init --role client
-hop pair <code-from-server>
+hop <code-from-server>
 ```
 
-Alternative when you already know server host + shared secret:
+This writes config, connects to the server, and starts the client automatically.
 
-```bash
-hop join <server-host> --secret <shared-secret>
-```
+4. Flick across the configured edge on the server machine.
 
-4. Run onboarding checks:
+Default config path:
+- Unix/macOS: `~/.config/hop/config.json` (or `$XDG_CONFIG_HOME/hop/config.json`)
+- Windows: `%APPDATA%\hop\config.json`
 
-```bash
-hop doctor
-```
-
-`hop doctor` reports config presence, secret status, peer control reachability, permission status, and screen size. It exits non-zero on hard blockers.
-
-5. Start both sides:
-
-Server:
-
-```bash
-hop run --role server
-```
-
-Client:
-
-```bash
-hop run --role client
-```
-
-6. Flick across the configured edge on the server machine.
-
-Use `--config <path>` with any command if you do not want `./hop.json`.
+Use `--config <path>` with any command to override the config location.
 
 ## Permissions
 
-- macOS: Accessibility + Input Monitoring are required. `hop doctor --open-permissions` can open the relevant System Settings panes.
+- macOS: Accessibility + Input Monitoring are required. `hop` checks permissions during real runs and prints/opens the relevant System Settings panes when needed.
 - Windows: hook/injection reliability is highest when `hop` and target apps run at matching privilege levels (same elevation).
 
 ## How it works
@@ -92,6 +68,7 @@ Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like password
 - Latency notes and validation checklist: [LATENCY.md](LATENCY.md)
 - Trust model and reporting guidance: [SECURITY.md](SECURITY.md)
 - Contribution workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Optional power-user commands: `hop init`, `hop pair`, `hop join`, `hop run`, `hop doctor`
 
 ## Comparison (short)
 
