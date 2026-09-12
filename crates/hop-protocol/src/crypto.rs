@@ -22,8 +22,8 @@ pub enum CryptoError {
 #[derive(Clone)]
 pub struct CipherState {
     cipher: ChaCha20Poly1305,
-    next_send_seq: u64,
-    min_recv_seq: u64,
+    control: ChannelState,
+    datagram: ChannelState,
 }
 
 impl CipherState {
@@ -31,14 +31,15 @@ impl CipherState {
         let key = Key::from_slice(session_key);
         Self {
             cipher: ChaCha20Poly1305::new(key),
-            next_send_seq: 0,
-            min_recv_seq: 0,
+            control: ChannelState::new(),
+            datagram: ChannelState::new(),
         }
     }
 
     pub fn seal(&mut self, channel: ChannelKind, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let seq = self.next_send_seq;
-        self.next_send_seq = self
+        let channel_state = self.channel_state_mut(channel);
+        let seq = channel_state.next_send_seq;
+        channel_state.next_send_seq = channel_state
             .next_send_seq
             .checked_add(1)
             .expect("sequence number overflow");
@@ -70,7 +71,7 @@ impl CipherState {
             .try_into()
             .map_err(|_| CryptoError::PacketDecoding)?;
         let seq = u64::from_be_bytes(seq_bytes);
-        if seq < self.min_recv_seq {
+        if self.channel_state_mut(channel).recv_window.is_replay(seq) {
             return Err(CryptoError::ReplayDetected);
         }
 
@@ -84,8 +85,17 @@ impl CipherState {
             .decrypt_in_place_detached(&nonce, &aad, &mut payload, tag)
             .map_err(|_| CryptoError::DecryptFailed)?;
 
-        self.min_recv_seq = seq.saturating_add(1);
+        self.channel_state_mut(channel)
+            .recv_window
+            .mark_accepted(seq);
         Ok(payload)
+    }
+
+    fn channel_state_mut(&mut self, channel: ChannelKind) -> &mut ChannelState {
+        match channel {
+            ChannelKind::Control => &mut self.control,
+            ChannelKind::Datagram => &mut self.datagram,
+        }
     }
 }
 
@@ -94,4 +104,77 @@ fn build_nonce(channel: ChannelKind, seq: u64) -> Nonce {
     bytes[..4].copy_from_slice(&(channel as u32).to_be_bytes());
     bytes[4..].copy_from_slice(&seq.to_be_bytes());
     *Nonce::from_slice(&bytes)
+}
+
+const REPLAY_WINDOW_SIZE: u64 = 64;
+
+#[derive(Clone, Copy)]
+struct ChannelState {
+    next_send_seq: u64,
+    recv_window: ReplayWindow,
+}
+
+impl ChannelState {
+    fn new() -> Self {
+        Self {
+            next_send_seq: 0,
+            recv_window: ReplayWindow::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayWindow {
+    highest_seq: Option<u64>,
+    seen_bits: u64,
+}
+
+impl ReplayWindow {
+    fn new() -> Self {
+        Self {
+            highest_seq: None,
+            seen_bits: 0,
+        }
+    }
+
+    fn is_replay(&self, seq: u64) -> bool {
+        let Some(highest_seq) = self.highest_seq else {
+            return false;
+        };
+
+        if seq > highest_seq {
+            return false;
+        }
+
+        let delta = highest_seq - seq;
+        if delta >= REPLAY_WINDOW_SIZE {
+            return true;
+        }
+
+        (self.seen_bits & (1_u64 << (delta as u32))) != 0
+    }
+
+    fn mark_accepted(&mut self, seq: u64) {
+        let Some(highest_seq) = self.highest_seq else {
+            self.highest_seq = Some(seq);
+            self.seen_bits = 1;
+            return;
+        };
+
+        if seq > highest_seq {
+            let shift = seq - highest_seq;
+            if shift >= REPLAY_WINDOW_SIZE {
+                self.seen_bits = 0;
+            } else {
+                self.seen_bits <<= shift as u32;
+            }
+            self.seen_bits |= 1;
+            self.highest_seq = Some(seq);
+            return;
+        }
+
+        let delta = highest_seq - seq;
+        debug_assert!(delta < REPLAY_WINDOW_SIZE);
+        self.seen_bits |= 1_u64 << (delta as u32);
+    }
 }
