@@ -175,13 +175,23 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
 
     let mut datagram_buffer = vec![0_u8; 4096];
     let mut latency_tracker = LatencyTracker::new(log_latency);
+    let mut handoff_active = false;
     loop {
         tokio::select! {
             result = recv_control_message(&mut stream, &mut cipher) => {
                 let message = result?;
                 println!("control message: {message:?}");
-                if let ControlMessage::HandoffEnd { owner_machine } = message {
-                    println!("control returned to {owner_machine}");
+                match message {
+                    ControlMessage::HandoffStart { to_machine, .. } => {
+                        if to_machine == config.local.machine_name {
+                            handoff_active = true;
+                        }
+                    }
+                    ControlMessage::HandoffEnd { owner_machine } => {
+                        handoff_active = false;
+                        println!("control returned to {owner_machine}");
+                    }
+                    _ => {}
                 }
             }
             datagram = udp_socket.recv_from(&mut datagram_buffer) => {
@@ -191,6 +201,9 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
                 }
                 let payload = &datagram_buffer[..len];
                 if let Ok(message) = decode_datagram(&mut cipher, payload) {
+                    if !handoff_active {
+                        continue;
+                    }
                     latency_tracker.observe(message.sent_at_micros);
                     adapters.input_injector.inject_event(&message.event)?;
                 }

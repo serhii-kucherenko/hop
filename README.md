@@ -20,7 +20,7 @@ This repository contains the first MVP architecture and command-line daemon:
 - macOS / Windows platform adapters behind trait boundaries
 - Linux mock adapters so CI runs on Linux now
 
-Native event capture/injection paths are scaffolded for macOS/Windows and ready for deeper implementation on real hardware.
+Native event capture/injection paths now use real platform APIs (CoreGraphics event tap/post on macOS and low-level hooks/SendInput on Windows) while Linux remains mock-only for CI.
 
 ## Why SideShift exists
 
@@ -159,19 +159,30 @@ Grant SideShift binary:
 - **Accessibility** permission
 - **Input Monitoring** permission
 
-You may also need Terminal/runner permission if launching from terminal while developing.
+Recommended grant path:
+1. Open **System Settings → Privacy & Security → Accessibility**
+2. Add your SideShift binary (or Terminal while developing), then enable it
+3. Open **System Settings → Privacy & Security → Input Monitoring**
+4. Add the same binary (or Terminal), then enable it
+5. Fully quit and relaunch the process after granting permissions
 
 #### Windows (required for real injection/capture work)
 
 Allow the binary through Windows Firewall on private networks.
-Depending on final Win32 hook/injection approach, running elevated may be required for certain desktop contexts.
+Run SideShift inside the active desktop user session (not as a background service). If the target app is elevated (Run as Administrator) or in a secure desktop/UAC prompt, SideShift may also need to run elevated to capture/inject there.
 
 ### 4) Launch order
 
 1. Start server
 2. Start client
 3. Move cursor to configured handoff edge on server machine
-4. Confirm client receives handoff status and input events
+4. Confirm cursor movement and keyboard typing appear on the client machine
+
+### Known native gaps (current MVP)
+
+- **macOS secure input contexts** (some password fields, lock/login surfaces) can block keyboard capture/injection by design.
+- **Windows elevated/secure desktop surfaces** (UAC prompts, admin apps from unelevated SideShift) can block hook visibility or input injection.
+- Key mapping currently targets common ANSI keys, modifiers, arrows, navigation, numpad, and function keys; uncommon OEM/media keys may need additional mapping coverage.
 
 ## Development
 
