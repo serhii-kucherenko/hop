@@ -42,7 +42,6 @@ const BENCH_GOAL_HIGH_MS: f64 = 3.0;
 const BACKGROUND_PID_FILE_NAME: &str = "hop.pid";
 const BACKGROUND_STOP_FILE_NAME: &str = "hop.stop";
 const BACKGROUND_LOG_FILE_NAME: &str = "hop.log";
-const BUILD_CHANNEL: &str = option_env!("HOP_BUILD_CHANNEL").unwrap_or("source");
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1077,7 +1076,8 @@ fn detect_screen_bounds() -> ScreenBounds {
 }
 
 fn build_source_label() -> &'static str {
-    if BUILD_CHANNEL.eq_ignore_ascii_case("release") {
+    let build_channel = option_env!("HOP_BUILD_CHANNEL").unwrap_or("source");
+    if build_channel.eq_ignore_ascii_case("release") {
         "release binary"
     } else {
         "source build"
