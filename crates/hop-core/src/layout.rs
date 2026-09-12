@@ -8,9 +8,30 @@ pub struct CursorPosition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScreenSize {
+pub struct ScreenBounds {
+    pub origin_x: i32,
+    pub origin_y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+impl ScreenBounds {
+    pub const fn from_size(width: u32, height: u32) -> Self {
+        Self {
+            origin_x: 0,
+            origin_y: 0,
+            width,
+            height,
+        }
+    }
+
+    pub fn max_x(self) -> i32 {
+        self.origin_x + self.width.saturating_sub(1) as i32
+    }
+
+    pub fn max_y(self) -> i32 {
+        self.origin_y + self.height.saturating_sub(1) as i32
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -69,17 +90,17 @@ pub fn invert_relative_position(position: RelativePosition) -> RelativePosition 
     }
 }
 
-pub fn detect_edge_crossing(position: CursorPosition, screen: ScreenSize) -> Option<Edge> {
-    if position.x < 0 {
+pub fn detect_edge_crossing(position: CursorPosition, screen: ScreenBounds) -> Option<Edge> {
+    if position.x < screen.origin_x {
         return Some(Edge::Left);
     }
-    if position.y < 0 {
+    if position.y < screen.origin_y {
         return Some(Edge::Top);
     }
-    if position.x >= screen.width as i32 {
+    if position.x > screen.max_x() {
         return Some(Edge::Right);
     }
-    if position.y >= screen.height as i32 {
+    if position.y > screen.max_y() {
         return Some(Edge::Bottom);
     }
     None

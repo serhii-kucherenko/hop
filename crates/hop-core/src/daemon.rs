@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -20,7 +21,7 @@ use crate::clipboard::{ClipboardSync, CLIPBOARD_POLL_INTERVAL};
 use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
-    edge_for_peer_position, CursorPosition, ScreenSize, SpatialLayout, SpatialNeighbor,
+    edge_for_peer_position, CursorPosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
 };
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
 
@@ -31,24 +32,25 @@ pub async fn run(
     config: Config,
     role_override: Option<NodeRole>,
     log_latency: bool,
+    stop_signal_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let role = role_override.unwrap_or(config.local.role);
     match role {
-        NodeRole::Server => run_server(config).await,
-        NodeRole::Client => run_client(config, log_latency).await,
+        NodeRole::Server => run_server(config, stop_signal_path.as_deref()).await,
+        NodeRole::Client => run_client(config, log_latency, stop_signal_path.as_deref()).await,
     }
 }
 
-async fn run_server(config: Config) -> anyhow::Result<()> {
+async fn run_server(config: Config, stop_signal_path: Option<&Path>) -> anyhow::Result<()> {
     let mut adapters = build_platform_adapters();
     let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
-        .screen_size()
-        .unwrap_or(ScreenSize {
-            width: config.local.screen_width,
-            height: config.local.screen_height,
-        });
+        .screen_bounds()
+        .unwrap_or(ScreenBounds::from_size(
+            config.local.screen_width,
+            config.local.screen_height,
+        ));
     println!(
         "starting hop server on control {} (data {}), waiting for client...",
         config.local.control_bind, config.local.data_bind
@@ -69,12 +71,21 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
                 config.local.data_bind
             )
         })?;
+    let mut stop_ticker = tokio::time::interval(Duration::from_millis(200));
+    stop_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         let (stream, addr) = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("{STOPPED_MESSAGE}");
                 return Ok(());
+            }
+            _ = stop_ticker.tick(), if stop_signal_path.is_some() => {
+                if stop_requested(stop_signal_path) {
+                    println!("{STOPPED_MESSAGE}");
+                    return Ok(());
+                }
+                continue;
             }
             accepted = listener.accept() => accepted.context("failed to accept client")?,
         };
@@ -87,6 +98,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
             &udp_socket,
             stream,
             addr,
+            stop_signal_path,
         )
         .await
         {
@@ -101,7 +113,11 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     }
 }
 
-async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
+async fn run_client(
+    config: Config,
+    log_latency: bool,
+    stop_signal_path: Option<&Path>,
+) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
     let swap_ctrl_cmd = config
@@ -112,11 +128,11 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
-        .screen_size()
-        .unwrap_or(ScreenSize {
-            width: config.local.screen_width,
-            height: config.local.screen_height,
-        });
+        .screen_bounds()
+        .unwrap_or(ScreenBounds::from_size(
+            config.local.screen_width,
+            config.local.screen_height,
+        ));
     let return_edge = edge_for_peer_position(peer.position);
     let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
     println!(
@@ -137,11 +153,20 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
 
     let mut datagram_buffer = vec![0_u8; 4096];
     let mut latency_tracker = LatencyTracker::new(log_latency);
+    let mut stop_ticker = tokio::time::interval(Duration::from_millis(200));
+    stop_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     'reconnect: loop {
         let mut stream = match tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("{STOPPED_MESSAGE}");
                 return Ok(());
+            }
+            _ = stop_ticker.tick(), if stop_signal_path.is_some() => {
+                if stop_requested(stop_signal_path) {
+                    println!("{STOPPED_MESSAGE}");
+                    return Ok(());
+                }
+                continue;
             }
             result = connect_client_control(&peer.control_addr) => result
         } {
@@ -194,11 +219,19 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
         let mut reconnect_required = false;
         let mut clipboard_ticker = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
         clipboard_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut session_stop_ticker = tokio::time::interval(Duration::from_millis(200));
+        session_stop_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         while !reconnect_required {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     println!("{STOPPED_MESSAGE}");
                     return Ok(());
+                }
+                _ = session_stop_ticker.tick(), if stop_signal_path.is_some() => {
+                    if stop_requested(stop_signal_path) {
+                        println!("{STOPPED_MESSAGE}");
+                        return Ok(());
+                    }
                 }
                 result = recv_control_message(&mut stream, &mut cipher) => {
                     let message = match result {
@@ -381,10 +414,11 @@ async fn run_server_session(
     config: &Config,
     adapters: &mut crate::platform::PlatformAdapters,
     clipboard_sync: &mut ClipboardSync,
-    local_screen: ScreenSize,
+    local_screen: ScreenBounds,
     udp_socket: &UdpSocket,
     mut stream: TcpStream,
     addr: SocketAddr,
+    stop_signal_path: Option<&Path>,
 ) -> anyhow::Result<ServerSessionControl> {
     let (hello, mut cipher) =
         complete_server_auth(&mut stream, config.local.shared_secret.as_bytes()).await?;
@@ -422,6 +456,8 @@ async fn run_server_session(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut clipboard_ticker = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
     clipboard_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut stop_ticker = tokio::time::interval(Duration::from_millis(200));
+    stop_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -435,6 +471,19 @@ async fn run_server_session(
                     "shutdown requested",
                 );
                 return Ok(ServerSessionControl::StopRequested);
+            }
+            _ = stop_ticker.tick(), if stop_signal_path.is_some() => {
+                if stop_requested(stop_signal_path) {
+                    recover_server_focus_local(
+                        &mut handoff,
+                        adapters.input_capture.as_mut(),
+                        adapters.cursor_controller.as_mut(),
+                        &mut cursor_hidden,
+                        local_screen,
+                        "stop requested by runtime signal",
+                    );
+                    return Ok(ServerSessionControl::StopRequested);
+                }
             }
             _ = ticker.tick() => {
                 let pending_events = adapters.input_capture.poll_input_events()?;
@@ -775,7 +824,7 @@ fn recover_server_focus_local(
     input_capture: &mut dyn LocalInputCapture,
     cursor_controller: &mut dyn CursorController,
     cursor_hidden: &mut bool,
-    screen: ScreenSize,
+    screen: ScreenBounds,
     reason: &str,
 ) {
     let release_edge = match handoff.focus_state() {
@@ -909,6 +958,10 @@ fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
+fn stop_requested(stop_signal_path: Option<&Path>) -> bool {
+    stop_signal_path.map(|path| path.exists()).unwrap_or(false)
+}
+
 const STICKY_RETURN_DISTANCE_THRESHOLD: i32 = 6;
 
 struct ReturnEdgeDetector {
@@ -931,7 +984,7 @@ impl ReturnEdgeDetector {
     fn should_release(
         &mut self,
         cursor: CursorPosition,
-        screen: ScreenSize,
+        screen: ScreenBounds,
         event: &InputEvent,
     ) -> bool {
         let InputEvent::MouseMove { dx, dy } = event else {
@@ -959,12 +1012,12 @@ impl ReturnEdgeDetector {
     }
 }
 
-fn cursor_is_on_edge(cursor: CursorPosition, screen: ScreenSize, edge: Edge) -> bool {
+fn cursor_is_on_edge(cursor: CursorPosition, screen: ScreenBounds, edge: Edge) -> bool {
     match edge {
-        Edge::Left => cursor.x <= 0,
-        Edge::Right => cursor.x >= screen.width.saturating_sub(1) as i32,
-        Edge::Top => cursor.y <= 0,
-        Edge::Bottom => cursor.y >= screen.height.saturating_sub(1) as i32,
+        Edge::Left => cursor.x <= screen.origin_x,
+        Edge::Right => cursor.x >= screen.max_x(),
+        Edge::Top => cursor.y <= screen.origin_y,
+        Edge::Bottom => cursor.y >= screen.max_y(),
     }
 }
 
@@ -1063,7 +1116,7 @@ mod tests {
         fn warp_cursor_to_safe_point(
             &mut self,
             _edge: Edge,
-            _screen: ScreenSize,
+            _screen: ScreenBounds,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1095,10 +1148,7 @@ mod tests {
     #[test]
     fn recover_server_focus_local_clears_remote_and_shows_cursor() {
         let mut handoff = HandoffController::new("macbook-pro");
-        let screen = ScreenSize {
-            width: 1920,
-            height: 1080,
-        };
+        let screen = ScreenBounds::from_size(1920, 1080);
         let layout = SpatialLayout::new(vec![SpatialNeighbor {
             machine_name: "windows-box".to_owned(),
             position: RelativePosition::Right,
@@ -1132,10 +1182,7 @@ mod tests {
 
     #[test]
     fn return_edge_detector_requires_edge_and_outbound_push_for_all_edges() {
-        let screen = ScreenSize {
-            width: 1920,
-            height: 1080,
-        };
+        let screen = ScreenBounds::from_size(1920, 1080);
         let scenarios = [
             (
                 Edge::Left,
@@ -1174,6 +1221,41 @@ mod tests {
             assert!(!detector.should_release(on_edge, screen, &outbound));
             assert!(detector.should_release(on_edge, screen, &outbound));
         }
+    }
+
+    #[test]
+    fn return_edge_detector_respects_virtual_desktop_origin() {
+        let screen = ScreenBounds {
+            origin_x: -1600,
+            origin_y: -200,
+            width: 3200,
+            height: 1400,
+        };
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        assert!(!detector.should_release(
+            CursorPosition {
+                x: screen.origin_x + 5,
+                y: 200
+            },
+            screen,
+            &InputEvent::MouseMove { dx: -4, dy: 0 }
+        ));
+        assert!(!detector.should_release(
+            CursorPosition {
+                x: screen.origin_x,
+                y: 200
+            },
+            screen,
+            &InputEvent::MouseMove { dx: -2, dy: 0 }
+        ));
+        assert!(detector.should_release(
+            CursorPosition {
+                x: screen.origin_x,
+                y: 200
+            },
+            screen,
+            &InputEvent::MouseMove { dx: -4, dy: 0 }
+        ));
     }
 
     #[tokio::test]

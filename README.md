@@ -13,7 +13,7 @@ Prefer release binaries from GitHub Releases:
 - macOS: `hop-x86_64-apple-darwin.tar.gz` or `hop-aarch64-apple-darwin.tar.gz`
 - Windows: `hop-x86_64-pc-windows-msvc.zip`
 
-If release binaries are not available yet, build locally:
+If a release has no attached binaries yet, build locally:
 
 ```bash
 git clone https://github.com/serhii-kucherenko/hop.git
@@ -41,13 +41,34 @@ This writes config, connects to the server, and starts the client automatically.
 
 Edge crossing switches ownership automatically while the daemon keeps running: the active machine receives input, and the inactive machine does not. Control is exclusive, not mirrored.
 
+Edge detection and return warps use the full virtual desktop bounds (multi-monitor aware), not only the primary monitor metrics.
+
 Switch matrix (server perspective): right -> client returns on left, left -> return on right, above -> return on bottom, below -> return on top. Behavior is symmetric when roles swap: whichever machine owns physical input is the server for that run.
 
-Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
+Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows virtual desktop hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
 
-On macOS clients, keyboard modifiers are swapped by default for Windows-origin shortcuts: Windows `Ctrl` is injected as Mac `Command`, and Windows `Win` key is injected as Mac `Control`. This makes `Ctrl+V`, `Ctrl+C`, `Ctrl+Z`, and similar shortcuts work naturally when controlling a Mac from a Windows keyboard. Set `local.swap_ctrl_cmd` to `false` in config to disable.
+Modifier swap support is directional and controlled by `local.swap_ctrl_cmd` on the client side:
+- macOS client (default `true`): incoming Windows `Ctrl` is injected as Mac `Command`, and incoming Windows `Win` is injected as Mac `Control`.
+- Windows client (default `false`): when enabled, incoming Mac `Command` is injected as Windows `Ctrl`, and incoming Mac `Control` is injected as Windows `Win`.
+
+This keeps common shortcuts natural when driving macOS from Windows or Windows from macOS. Set `local.swap_ctrl_cmd` explicitly per machine when needed.
 
 Stop hop with Ctrl+C in each machine terminal; hop prints `hop stopped; local input restored` and releases local input.
+
+To run without blocking a terminal:
+
+```bash
+hop run --background
+hop stop
+```
+
+Background logs are written next to your config as `hop.log`.
+
+Autostart (manual MVP):
+- macOS: create a LaunchAgent that runs `hop run --background` at login.
+- Windows: add `hop run --background` to Task Scheduler (At log on) or Startup.
+
+`hop doctor` reports current screen geometry, effective `swap_ctrl_cmd`, clipboard backend readiness, and whether the binary was built from source or release pipeline.
 
 Manual end-to-end validation checklist: [MANUAL_E2E.md](MANUAL_E2E.md)
 
@@ -94,6 +115,7 @@ Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like password
 ## More detail
 
 - Latency notes and validation checklist: [LATENCY.md](LATENCY.md)
+- Latency benchmark command: `hop bench [--host <host:port>] [--samples N] [--timeout-ms N] [--strict]`
 - Trust model and reporting guidance: [SECURITY.md](SECURITY.md)
 - Contribution workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Optional power-user commands: `hop init`, `hop pair`, `hop join`, `hop run`, `hop doctor`

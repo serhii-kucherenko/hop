@@ -22,3 +22,4 @@ Wi-Fi can work well for casual use, but jitter spikes are common under contentio
 1. Baseline ping stability between both machines
 2. Repeated edge-cross flick tests while typing immediately after handoff
 3. Compare wired vs Wi-Fi feel and logged estimates (`--log-latency`) against the 1–3ms goal / 5ms hard max
+4. Run `hop bench` (or `hop bench --strict` on wired LAN) to capture encrypted control-path RTT p50/p95 and one-way estimates

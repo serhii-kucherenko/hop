@@ -1,7 +1,7 @@
 use hop_core::handoff::{FocusState, HandoffAction, HandoffController};
 use hop_core::layout::{
     detect_edge_crossing, edge_for_peer_position, invert_relative_position, CursorPosition,
-    RelativePosition, ScreenSize, SpatialLayout, SpatialNeighbor,
+    RelativePosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
 };
 use hop_protocol::control::Edge;
 use hop_protocol::datagram::InputEvent;
@@ -15,10 +15,7 @@ fn two_machine_layout() -> SpatialLayout {
 
 #[test]
 fn edge_detection_matches_screen_boundaries() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
 
     assert_eq!(
         detect_edge_crossing(CursorPosition { x: -1, y: 200 }, screen),
@@ -44,10 +41,7 @@ fn edge_detection_matches_screen_boundaries() {
 
 #[test]
 fn handoff_begins_when_crossing_edge_with_neighbor() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
 
@@ -71,10 +65,7 @@ fn handoff_begins_when_crossing_edge_with_neighbor() {
 
 #[test]
 fn handoff_release_returns_focus_locally() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
     let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
@@ -91,10 +82,7 @@ fn handoff_release_returns_focus_locally() {
 
 #[test]
 fn force_local_resets_remote_focus_state() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
     let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
@@ -119,10 +107,7 @@ fn no_handoff_when_crossing_without_neighbor() {
         machine_name: "windows-box".to_owned(),
         position: RelativePosition::Left,
     }]);
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let mut controller = HandoffController::new("macbook-pro");
     let action =
         controller.on_local_cursor(CursorPosition { x: 1921, y: 20 }, screen, &layout, &[]);
@@ -133,10 +118,7 @@ fn no_handoff_when_crossing_without_neighbor() {
 #[test]
 fn handoff_begins_when_pushing_into_clamped_right_edge() {
     let layout = two_machine_layout();
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let mut controller = HandoffController::new("macbook-pro");
     let edge_cursor = CursorPosition { x: 1919, y: 320 };
 
@@ -158,10 +140,7 @@ fn handoff_begins_when_pushing_into_clamped_right_edge() {
 #[test]
 fn handoff_requires_outbound_motion_on_clamped_edge() {
     let layout = two_machine_layout();
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let mut controller = HandoffController::new("macbook-pro");
     let edge_cursor = CursorPosition { x: 1919, y: 320 };
 
@@ -180,10 +159,7 @@ fn handoff_requires_outbound_motion_on_clamped_edge() {
 
 #[test]
 fn sticky_handoff_supports_left_top_and_bottom_edges() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let cases = [
         (
             RelativePosition::Left,
@@ -273,10 +249,7 @@ fn return_edge_matrix_matches_inverted_server_layout() {
 
 #[test]
 fn second_enter_is_noop_while_already_remote_for_all_positions() {
-    let screen = ScreenSize {
-        width: 1920,
-        height: 1080,
-    };
+    let screen = ScreenBounds::from_size(1920, 1080);
     let scenarios = [
         (
             RelativePosition::Right,
@@ -325,4 +298,55 @@ fn second_enter_is_noop_while_already_remote_for_all_positions() {
             }
         );
     }
+}
+
+#[test]
+fn edge_detection_supports_virtual_desktop_origins() {
+    let screen = ScreenBounds {
+        origin_x: -1920,
+        origin_y: -120,
+        width: 3840,
+        height: 2280,
+    };
+
+    assert_eq!(
+        detect_edge_crossing(
+            CursorPosition {
+                x: screen.origin_x - 1,
+                y: 400
+            },
+            screen
+        ),
+        Some(Edge::Left)
+    );
+    assert_eq!(
+        detect_edge_crossing(
+            CursorPosition {
+                x: screen.max_x() + 1,
+                y: 400
+            },
+            screen
+        ),
+        Some(Edge::Right)
+    );
+    assert_eq!(
+        detect_edge_crossing(
+            CursorPosition {
+                x: 100,
+                y: screen.origin_y - 1
+            },
+            screen
+        ),
+        Some(Edge::Top)
+    );
+    assert_eq!(
+        detect_edge_crossing(
+            CursorPosition {
+                x: 100,
+                y: screen.max_y() + 1
+            },
+            screen
+        ),
+        Some(Edge::Bottom)
+    );
 }

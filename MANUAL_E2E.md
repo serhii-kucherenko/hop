@@ -13,6 +13,10 @@ Position matrix (from server perspective):
 - client above: enter on server top edge, return on client bottom edge
 - client below: enter on server bottom edge, return on client top edge
 
+Virtual desktop geometry:
+- When either machine has multiple displays, test against the full virtual desktop bounds.
+- Confirm handoff triggers on the outer-most virtual edge (not only a primary display edge).
+
 For each position above, run all cases A-M:
 
 A. Enter edge once:
@@ -90,3 +94,28 @@ M. Clipboard sync (bidirectional while remote ownership is active):
 - Expected: files appear in the other machine clipboard and can be pasted from a staged local temp location.
 - While still remote, repeat text/image/file copy from the other side after return handoff.
 - Expected: sync works in both directions without ping-pong loops or repeated clipboard churn.
+
+N. Multi-monitor edge and warp behavior:
+- Arrange two displays so one monitor has negative X or Y in OS arrangement.
+- Push into each configured handoff edge on the server.
+- Expected: handoff begins at virtual desktop outer edge, including negative-coordinate layouts.
+- End handoff from client return edge.
+- Expected: local cursor warps to a safe point inside the opposite edge of the full virtual desktop.
+
+O. Modifier swap matrix (Mac <-> Windows):
+- Windows server -> macOS client (default swap): hold `Ctrl` and press `C`, `V`, `A`, `Z`.
+- Expected: macOS receives `Command` shortcuts.
+- macOS server -> Windows client (set `local.swap_ctrl_cmd=true` on Windows client): hold `Command` and press `C`, `V`, `A`, `Z`.
+- Expected: Windows receives `Ctrl` shortcuts.
+- In both directions, verify disabled mode (`local.swap_ctrl_cmd=false`) preserves native modifiers.
+
+P. Background mode lifecycle:
+- Start hop with `hop run --background`.
+- Confirm terminal returns immediately while handoff still works.
+- Run `hop stop`.
+- Expected: daemon exits and local input is restored.
+
+Q. Bench command sanity:
+- With peer daemon running, execute `hop bench`.
+- Expected: p50/p95 one-way and RTT values are printed against 1-3ms goal and 5ms hard max.
+- If using wired LAN and `--strict`, command should fail when p95 one-way exceeds 5ms.

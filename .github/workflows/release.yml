@@ -4,24 +4,19 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish assets to (example: v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            archive: tar.gz
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
+  build-macos:
+    name: Build macOS binaries
+    runs-on: macos-14
 
     steps:
       - name: Checkout
@@ -30,37 +25,65 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
 
-      - name: Build release binary
-        run: cargo build --release -p hop --target ${{ matrix.target }}
+      - name: Build release binaries
+        env:
+          HOP_BUILD_CHANNEL: release
+        run: |
+          cargo build --release -p hop --target x86_64-apple-darwin
+          cargo build --release -p hop --target aarch64-apple-darwin
 
-      - name: Package archive (unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package macOS archives
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/hop dist/hop
-          tar -C dist -czf hop-${{ matrix.target }}.tar.gz hop
-
-      - name: Package archive (windows)
-        if: matrix.archive == 'zip'
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/hop.exe" "dist/hop.exe"
-          Compress-Archive -Path "dist/hop.exe" -DestinationPath "hop-${{ matrix.target }}.zip" -Force
+          cp target/x86_64-apple-darwin/release/hop dist/hop
+          tar -C dist -czf hop-x86_64-apple-darwin.tar.gz hop
+          cp target/aarch64-apple-darwin/release/hop dist/hop
+          tar -C dist -czf hop-aarch64-apple-darwin.tar.gz hop
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hop-${{ matrix.target }}
-          path: hop-${{ matrix.target }}.*
+          name: hop-macos-archives
+          path: hop-*-apple-darwin.tar.gz
+
+  build-windows:
+    name: Build Windows binary
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        env:
+          HOP_BUILD_CHANNEL: release
+        run: cargo build --release -p hop --target x86_64-pc-windows-msvc
+
+      - name: Package archive
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/hop.exe" "dist/hop.exe"
+          Compress-Archive -Path "dist/hop.exe" -DestinationPath "hop-x86_64-pc-windows-msvc.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hop-windows-archive
+          path: hop-x86_64-pc-windows-msvc.zip
 
   attach:
     name: Attach binaries to release
-    needs: build
-    if: github.event_name == 'release'
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -70,6 +93,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/**/*.tar.gz
             dist/**/*.zip
