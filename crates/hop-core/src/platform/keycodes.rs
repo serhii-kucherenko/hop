@@ -1,3 +1,12 @@
+const WIRE_LEFT_COMMAND: u16 = 0x5B;
+const WIRE_RIGHT_COMMAND: u16 = 0x5C;
+const WIRE_LEFT_CONTROL: u16 = 0xA2;
+const WIRE_RIGHT_CONTROL: u16 = 0xA3;
+const MAC_LEFT_COMMAND: u16 = 55;
+const MAC_RIGHT_COMMAND: u16 = 54;
+const MAC_LEFT_CONTROL: u16 = 59;
+const MAC_RIGHT_CONTROL: u16 = 62;
+
 pub(crate) fn mac_keycode_to_wire(mac_keycode: u16) -> Option<u16> {
     match mac_keycode {
         0 => Some(0x41),   // A
@@ -232,6 +241,22 @@ pub(crate) fn wire_to_mac_keycode(wire_keycode: u16) -> Option<u16> {
     }
 }
 
+pub(crate) fn wire_to_mac_keycode_for_injection(
+    wire_keycode: u16,
+    swap_ctrl_cmd: bool,
+) -> Option<u16> {
+    if swap_ctrl_cmd {
+        match wire_keycode {
+            WIRE_LEFT_CONTROL => return Some(MAC_LEFT_COMMAND),
+            WIRE_RIGHT_CONTROL => return Some(MAC_RIGHT_COMMAND),
+            WIRE_LEFT_COMMAND => return Some(MAC_LEFT_CONTROL),
+            WIRE_RIGHT_COMMAND => return Some(MAC_RIGHT_CONTROL),
+            _ => {}
+        }
+    }
+    wire_to_mac_keycode(wire_keycode)
+}
+
 pub(crate) fn windows_vk_to_wire(vk: u32) -> Option<u16> {
     u16::try_from(vk).ok()
 }
@@ -242,7 +267,10 @@ pub(crate) fn wire_to_windows_vk(wire_keycode: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{mac_keycode_to_wire, windows_vk_to_wire, wire_to_mac_keycode, wire_to_windows_vk};
+    use super::{
+        mac_keycode_to_wire, windows_vk_to_wire, wire_to_mac_keycode,
+        wire_to_mac_keycode_for_injection, wire_to_windows_vk,
+    };
 
     #[test]
     fn mac_letters_roundtrip_through_wire_codes() {
@@ -278,5 +306,19 @@ mod tests {
         assert_eq!(windows_vk_to_wire(0x41), Some(0x41));
         assert_eq!(windows_vk_to_wire(u32::from(u16::MAX) + 1), None);
         assert_eq!(wire_to_windows_vk(0x7A), 0x7A);
+    }
+
+    #[test]
+    fn mac_injection_swap_maps_ctrl_to_command_and_command_to_control() {
+        assert_eq!(wire_to_mac_keycode_for_injection(0xA2, true), Some(55));
+        assert_eq!(wire_to_mac_keycode_for_injection(0xA3, true), Some(54));
+        assert_eq!(wire_to_mac_keycode_for_injection(0x5B, true), Some(59));
+        assert_eq!(wire_to_mac_keycode_for_injection(0x5C, true), Some(62));
+    }
+
+    #[test]
+    fn mac_injection_swap_keeps_default_mapping_when_disabled() {
+        assert_eq!(wire_to_mac_keycode_for_injection(0xA2, false), Some(59));
+        assert_eq!(wire_to_mac_keycode_for_injection(0x5B, false), Some(55));
     }
 }
