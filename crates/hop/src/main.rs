@@ -103,7 +103,7 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_DATA_PORT)]
         data_port: u16,
         /// Position of the server relative to this client.
-        #[arg(long, default_value_t = PositionArg::Left)]
+        #[arg(long, default_value = "left")]
         position: PositionArg,
     },
     /// Run onboarding checks and report hard blockers.
@@ -776,7 +776,7 @@ async fn check_peer_reachable(addr: &str, timeout_ms: u64) -> anyhow::Result<()>
     timeout(Duration::from_millis(timeout_ms), connect_future)
         .await
         .map_err(|_| anyhow::anyhow!("timed out after {}ms", timeout_ms))?
-        .with_context(|| format!("connect failed"))?;
+        .context("connect failed")?;
     Ok(())
 }
 
