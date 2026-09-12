@@ -598,67 +598,6 @@ fn recover_server_focus_local(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layout::{CursorPosition, RelativePosition};
-    use crate::platform::CursorController;
-    use hop_protocol::control::Edge;
-
-    #[derive(Default)]
-    struct TestCursorController {
-        show_calls: usize,
-    }
-
-    impl CursorController for TestCursorController {
-        fn hide_cursor(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn show_cursor(&mut self) -> anyhow::Result<()> {
-            self.show_calls += 1;
-            Ok(())
-        }
-
-        fn warp_cursor_to_safe_point(
-            &mut self,
-            _edge: Edge,
-            _screen: ScreenSize,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn recover_server_focus_local_clears_remote_and_shows_cursor() {
-        let mut handoff = HandoffController::new("macbook-pro");
-        let screen = ScreenSize {
-            width: 1920,
-            height: 1080,
-        };
-        let layout = SpatialLayout::new(vec![SpatialNeighbor {
-            machine_name: "windows-box".to_owned(),
-            position: RelativePosition::Right,
-        }]);
-        let action =
-            handoff.on_local_cursor(CursorPosition { x: 1921, y: 200 }, screen, &layout, &[]);
-        assert!(matches!(action, HandoffAction::Begin { .. }));
-
-        let mut cursor_controller = TestCursorController::default();
-        let mut cursor_hidden = true;
-        recover_server_focus_local(
-            &mut handoff,
-            &mut cursor_controller,
-            &mut cursor_hidden,
-            "control disconnect",
-        );
-
-        assert!(matches!(handoff.focus_state(), FocusState::Local));
-        assert!(!cursor_hidden);
-        assert_eq!(cursor_controller.show_calls, 1);
-    }
-}
-
 async fn complete_server_auth(
     stream: &mut TcpStream,
     secret: &[u8],
@@ -816,5 +755,66 @@ impl LatencyTracker {
         self.total_micros = 0;
         self.max_micros = 0;
         self.next_report_at_micros = now.saturating_add(1_000_000);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{CursorPosition, RelativePosition};
+    use crate::platform::CursorController;
+    use hop_protocol::control::Edge;
+
+    #[derive(Default)]
+    struct TestCursorController {
+        show_calls: usize,
+    }
+
+    impl CursorController for TestCursorController {
+        fn hide_cursor(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> anyhow::Result<()> {
+            self.show_calls += 1;
+            Ok(())
+        }
+
+        fn warp_cursor_to_safe_point(
+            &mut self,
+            _edge: Edge,
+            _screen: ScreenSize,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recover_server_focus_local_clears_remote_and_shows_cursor() {
+        let mut handoff = HandoffController::new("macbook-pro");
+        let screen = ScreenSize {
+            width: 1920,
+            height: 1080,
+        };
+        let layout = SpatialLayout::new(vec![SpatialNeighbor {
+            machine_name: "windows-box".to_owned(),
+            position: RelativePosition::Right,
+        }]);
+        let action =
+            handoff.on_local_cursor(CursorPosition { x: 1921, y: 200 }, screen, &layout, &[]);
+        assert!(matches!(action, HandoffAction::Begin { .. }));
+
+        let mut cursor_controller = TestCursorController::default();
+        let mut cursor_hidden = true;
+        recover_server_focus_local(
+            &mut handoff,
+            &mut cursor_controller,
+            &mut cursor_hidden,
+            "control disconnect",
+        );
+
+        assert!(matches!(handoff.focus_state(), FocusState::Local));
+        assert!(!cursor_hidden);
+        assert_eq!(cursor_controller.show_calls, 1);
     }
 }
