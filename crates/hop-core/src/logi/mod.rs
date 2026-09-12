@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use crate::config::{Config, HandoffMode};
 use crate::layout::ScreenBounds;
 
+mod hidpp;
+
 const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(180);
 const IPC_IO_TIMEOUT: Duration = Duration::from_millis(180);
 const MAX_AGENT_PACKET_BYTES: usize = 4 * 1024 * 1024;
@@ -59,9 +61,12 @@ pub struct LogiHandoff {
     local_machine_name: String,
     endpoint: Option<AgentEndpoint>,
     devices: Vec<LogiDevice>,
+    hidpp_targets: Vec<hidpp::HidppTarget>,
     peer_host_index: HashMap<String, u8>,
     local_host_index: Option<u8>,
     status_note: String,
+    options_status: String,
+    hidpp_status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +79,9 @@ pub struct LogiSummary {
     pub requested_mode: HandoffMode,
     pub selected_transport: String,
     pub options_agent_endpoint: Option<String>,
+    pub options_status: String,
+    pub hidpp_status: String,
+    pub hidpp_device_count: usize,
     pub local_host_index: Option<u8>,
     pub peer_host_index: BTreeMap<String, u8>,
     pub devices: Vec<LogiDevice>,
@@ -91,28 +99,55 @@ impl LogiHandoff {
             .collect::<Vec<_>>();
         let explicit_map = config.handoff.logi_peer_host_index.clone();
 
-        let discovery = detect_options_agent();
-        let (peer_host_index, local_host_index, mapping_note) = build_peer_host_map(
-            &local_machine_name,
-            &peer_names,
-            &explicit_map,
-            &discovery.devices,
-        );
-        let status_note = match (&discovery.status_note, mapping_note) {
-            (Some(base), Some(extra)) => format!("{base}; {extra}"),
-            (Some(base), None) => base.clone(),
-            (None, Some(extra)) => extra,
-            (None, None) => "ready".to_owned(),
-        };
+        // HID++ ChangeHost is the primary Easy-Switch path; Options+ IPC is best-effort.
+        let hidpp = hidpp::discover_change_host_devices();
+        let options = detect_options_agent();
+
+        let mut devices = hidpp.as_logi_devices();
+        if devices.is_empty() {
+            devices = options.devices.clone();
+        } else if !options.devices.is_empty() {
+            // Prefer Options+ host names/OS hints when available for mapping.
+            devices = merge_devices_preferring_named(options.devices.clone(), devices);
+        }
+
+        let (peer_host_index, local_host_index, mapping_note) =
+            build_peer_host_map(&local_machine_name, &peer_names, &explicit_map, &devices);
+
+        let options_status = options.status_note.clone().unwrap_or_else(|| {
+            if options.endpoint.is_some() {
+                "options+ ipc ready".to_owned()
+            } else {
+                "options+ ipc unavailable".to_owned()
+            }
+        });
+        let hidpp_status = hidpp.status_note.clone();
+
+        let mut notes = Vec::new();
+        notes.push(hidpp_status.clone());
+        notes.push(options_status.clone());
+        if let Some(extra) = mapping_note {
+            notes.push(extra);
+        }
+        if hidpp.is_ready() && peer_host_index.is_empty() && !peer_names.is_empty() {
+            notes.push(
+                "set handoff.logi_peer_host_index after doctor lists channels (HID++ has no host names)"
+                    .to_owned(),
+            );
+        }
+        let status_note = notes.join("; ");
 
         Self {
             requested_mode,
             local_machine_name,
-            endpoint: discovery.endpoint,
-            devices: discovery.devices,
+            endpoint: options.endpoint,
+            devices,
+            hidpp_targets: hidpp.targets,
             peer_host_index,
             local_host_index,
             status_note,
+            options_status,
+            hidpp_status,
         }
     }
 
@@ -137,12 +172,22 @@ impl LogiHandoff {
         let Some(target_index) = self.peer_host_index.get(peer_machine).copied() else {
             return false;
         };
-        self.endpoint.is_some()
+        let hidpp_ok = !self.hidpp_targets.is_empty()
+            && self
+                .hidpp_targets
+                .iter()
+                .all(|target| target_index < target.host_count);
+        let options_ok = self.endpoint.is_some()
             && !self.devices.is_empty()
             && self
                 .devices
                 .iter()
-                .all(|device| device.hosts.iter().any(|host| host.index == target_index))
+                .all(|device| device.hosts.iter().any(|host| host.index == target_index));
+        hidpp_ok || options_ok
+    }
+
+    fn logi_path_ready(&self) -> bool {
+        !self.hidpp_targets.is_empty() || (self.endpoint.is_some() && !self.devices.is_empty())
     }
 
     pub fn switch_to_peer(&self, peer_machine: &str) -> Result<()> {
@@ -165,15 +210,23 @@ impl LogiHandoff {
         let selected_transport = match self.requested_mode {
             HandoffMode::Network => "network".to_owned(),
             HandoffMode::Auto => {
-                if self.endpoint.is_some() && !self.devices.is_empty() {
-                    "auto(logi-first)".to_owned()
+                if self.logi_path_ready() && !self.peer_host_index.is_empty() {
+                    if !self.hidpp_targets.is_empty() {
+                        "auto(hidpp-first)".to_owned()
+                    } else {
+                        "auto(logi-options+)".to_owned()
+                    }
                 } else {
                     "auto(network-fallback)".to_owned()
                 }
             }
             HandoffMode::Logi => {
-                if self.endpoint.is_some() && !self.devices.is_empty() {
-                    "logi".to_owned()
+                if self.logi_path_ready() && !self.peer_host_index.is_empty() {
+                    if !self.hidpp_targets.is_empty() {
+                        "logi(hidpp)".to_owned()
+                    } else {
+                        "logi(options+)".to_owned()
+                    }
                 } else {
                     "logi(requested)-network(fallback)".to_owned()
                 }
@@ -189,6 +242,9 @@ impl LogiHandoff {
             requested_mode: self.requested_mode,
             selected_transport,
             options_agent_endpoint: self.endpoint.as_ref().map(ToString::to_string),
+            options_status: self.options_status.clone(),
+            hidpp_status: self.hidpp_status.clone(),
+            hidpp_device_count: self.hidpp_targets.len(),
             local_host_index: self.local_host_index,
             peer_host_index: self
                 .peer_host_index
@@ -215,9 +271,24 @@ impl LogiHandoff {
             "handoff mode: {:?} -> {}",
             summary.requested_mode, summary.selected_transport
         ));
+        lines.push(format!(
+            "hid++ ChangeHost: {} ({})",
+            if summary.hidpp_device_count > 0 {
+                format!("{} device(s)", summary.hidpp_device_count)
+            } else {
+                "none".to_owned()
+            },
+            summary.hidpp_status
+        ));
         match summary.options_agent_endpoint {
-            Some(endpoint) => lines.push(format!("logi options+ agent: detected ({endpoint})")),
-            None => lines.push("logi options+ agent: not detected".to_owned()),
+            Some(endpoint) => lines.push(format!(
+                "logi options+ agent: detected ({endpoint}) [{}]",
+                summary.options_status
+            )),
+            None => lines.push(format!(
+                "logi options+ agent: unavailable [{}]",
+                summary.options_status
+            )),
         }
         if summary.devices.is_empty() {
             lines.push("easy-switch devices: none".to_owned());
@@ -252,8 +323,13 @@ impl LogiHandoff {
     }
 
     fn switch_to_host_index(&self, host_index: u8) -> Result<()> {
+        if !self.hidpp_targets.is_empty() {
+            return hidpp::switch_targets_to_host(&self.hidpp_targets, host_index)
+                .with_context(|| format!("hid++ switch to channel {}", host_index + 1));
+        }
+
         let Some(endpoint) = self.endpoint.as_ref() else {
-            anyhow::bail!("options+ agent is not available");
+            anyhow::bail!("no hid++ ChangeHost devices and options+ agent is unavailable");
         };
 
         let mut client = OptionsAgentClient::connect(endpoint)?;
@@ -294,6 +370,17 @@ impl LogiHandoff {
                 })?;
         }
         Ok(())
+    }
+}
+
+fn merge_devices_preferring_named(
+    named: Vec<LogiDevice>,
+    hidpp_devices: Vec<LogiDevice>,
+) -> Vec<LogiDevice> {
+    if !named.is_empty() {
+        named
+    } else {
+        hidpp_devices
     }
 }
 
@@ -576,21 +663,15 @@ fn detect_options_agent() -> AgentDiscovery {
         }
     }
 
-    if let Some(endpoint) = connected_without_devices {
-        return AgentDiscovery {
-            endpoint: Some(endpoint),
-            devices: Vec::new(),
-            status_note: Some(
-                last_error
-                    .unwrap_or_else(|| "options+ detected but no easy-switch devices".to_owned()),
-            ),
-        };
-    }
-
+    // Connect without a working device list is not enough — Options+ IPC is often gated.
+    let _ = connected_without_devices;
     AgentDiscovery {
         endpoint: None,
         devices: Vec::new(),
-        status_note: Some(last_error.unwrap_or_else(|| "options+ agent not reachable".to_owned())),
+        status_note: Some(last_error.unwrap_or_else(|| {
+            "options+ ipc unavailable/gated (handshake EOF/timeout or no easy-switch devices)"
+                .to_owned()
+        })),
     }
 }
 
@@ -765,35 +846,116 @@ fn candidate_endpoints() -> Vec<AgentEndpoint> {
     let mut endpoints = Vec::new();
     #[cfg(unix)]
     {
-        let mut unix_paths = Vec::new();
-        if let Ok(entries) = fs::read_dir("/tmp") {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.contains("logitech_kiros_agent") {
-                    unix_paths.push(entry.path());
-                }
-            }
-        }
+        let mut unix_paths = discover_unix_kiros_sockets();
         unix_paths.sort();
+        // Prefer live sockets that accept connect before TCP fallback.
         for path in unix_paths {
             endpoints.push(AgentEndpoint::UnixSocket(path));
         }
     }
     #[cfg(windows)]
     {
-        let pipe_names = [
-            r"\\.\pipe\logitech_kiros_agent",
-            r"\\.\pipe\logitech_kiros_agent-main",
-        ];
-        for pipe_name in pipe_names {
-            endpoints.push(AgentEndpoint::NamedPipe(pipe_name.to_owned()));
+        for pipe_name in discover_windows_kiros_pipes() {
+            endpoints.push(AgentEndpoint::NamedPipe(pipe_name));
         }
     }
+    // TCP last: connect success without handshake is not treated as ready.
     if let Ok(addr) = format!("127.0.0.1:{LOGI_FLOW_TCP_PORT}").parse() {
         endpoints.push(AgentEndpoint::Tcp(addr));
     }
     dedupe_endpoints(endpoints)
+}
+
+pub fn is_kiros_agent_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("logitech_kiros_agent")
+}
+
+pub fn filter_kiros_pipe_candidates(names: &[String]) -> Vec<String> {
+    let mut out = names
+        .iter()
+        .filter(|name| is_kiros_agent_name(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(unix)]
+fn discover_unix_kiros_sockets() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(entries) = fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_kiros_agent_name(&name) {
+                let path = entry.path();
+                if unix_socket_accepts_connect(&path) {
+                    paths.insert(0, path);
+                } else {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths.extend(discover_unix_sockets_via_process_scan());
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+#[cfg(unix)]
+fn unix_socket_accepts_connect(path: &std::path::Path) -> bool {
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn discover_unix_sockets_via_process_scan() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(output) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(
+            "pgrep -f 'logi|cp-dev-mgr|kiros' 2>/dev/null | head -5 | while read pid; do lsof -p \"$pid\" -a -U 2>/dev/null; done | awk '{print $NF}' | grep -i logitech_kiros_agent | head -20",
+        )
+        .output()
+    else {
+        return paths;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('/') && is_kiros_agent_name(trimmed) {
+            paths.push(PathBuf::from(trimmed));
+        }
+    }
+    paths
+}
+
+#[cfg(windows)]
+fn discover_windows_kiros_pipes() -> Vec<String> {
+    let mut names = Vec::new();
+    names.push(r"\\.\pipe\logitech_kiros_agent".to_owned());
+    names.push(r"\\.\pipe\logitech_kiros_agent-main".to_owned());
+    if let Ok(entries) = fs::read_dir(r"\\.\pipe\") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_kiros_agent_name(&name) {
+                names.push(format!(r"\\.\pipe\{}", name));
+            }
+        }
+    }
+    filter_kiros_pipe_candidates(&names)
 }
 
 fn dedupe_endpoints(input: Vec<AgentEndpoint>) -> Vec<AgentEndpoint> {
@@ -816,8 +978,20 @@ struct OptionsAgentClient {
 impl OptionsAgentClient {
     fn connect(endpoint: &AgentEndpoint) -> Result<Self> {
         let mut stream = AgentStream::connect(endpoint)?;
-        let _ = read_packet(&mut stream).context("failed to read options+ handshake")?;
-        write_packet(&mut stream, &[b"json"]).context("failed to send options+ json announce")?;
+        // Server-first handshake with short timeout; on EOF/timeout try client-first once.
+        match read_packet(&mut stream) {
+            Ok(_) => {
+                write_packet(&mut stream, &[b"json"])
+                    .context("failed to send options+ json announce")?;
+            }
+            Err(_) => {
+                write_packet(&mut stream, &[b"json"]).context(
+                    "options+ handshake timed out/EOF; client-first json announce also failed",
+                )?;
+                // Do not wait long for a reply from dead endpoints.
+                let _ = read_packet(&mut stream);
+            }
+        }
         Ok(Self {
             stream,
             next_msg_id: 1,
@@ -1116,5 +1290,88 @@ mod tests {
         let (map, local, _) = build_peer_host_map("MAC-LAPTOP", &peers, &explicit, &devices);
         assert_eq!(local, Some(1));
         assert_eq!(map.get("WIN-DESK"), Some(&0));
+    }
+
+    #[test]
+    fn filters_hashed_kiros_pipe_names() {
+        let names = vec![
+            "chrome.sync".to_owned(),
+            "logitech_kiros_agent".to_owned(),
+            "logitech_kiros_agent-ab12cd".to_owned(),
+            "other_pipe".to_owned(),
+        ];
+        let filtered = filter_kiros_pipe_candidates(&names);
+        assert_eq!(
+            filtered,
+            vec![
+                "logitech_kiros_agent".to_owned(),
+                "logitech_kiros_agent-ab12cd".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn kiros_socket_name_filter() {
+        assert!(is_kiros_agent_name("logitech_kiros_agent-1234"));
+        assert!(is_kiros_agent_name(
+            r"\\.\pipe\logitech_kiros_agent-deadbeef"
+        ));
+        assert!(!is_kiros_agent_name("uuid-socket-without-prefix"));
+    }
+
+    #[test]
+    fn preferred_transport_uses_hidpp_without_options() {
+        let handoff = LogiHandoff {
+            requested_mode: HandoffMode::Auto,
+            local_machine_name: "windows-desktop".to_owned(),
+            endpoint: None,
+            devices: vec![LogiDevice {
+                id: "hidpp:test".to_owned(),
+                name: "MX Mouse".to_owned(),
+                kind: LogiDeviceKind::Mouse,
+                hosts: vec![
+                    LogiHostSlot {
+                        index: 0,
+                        paired: true,
+                        connected: true,
+                        os: None,
+                        name: None,
+                    },
+                    LogiHostSlot {
+                        index: 1,
+                        paired: true,
+                        connected: false,
+                        os: None,
+                        name: None,
+                    },
+                ],
+                current_host: Some(0),
+            }],
+            hidpp_targets: vec![hidpp::HidppTarget {
+                path: b"/dev/hidraw0".to_vec(),
+                name: "MX Mouse".to_owned(),
+                kind: LogiDeviceKind::Mouse,
+                product_id: 0x1234,
+                device_index: 0xFF,
+                report_id: hidpp::REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 2,
+                current_host: 0,
+            }],
+            peer_host_index: {
+                let mut map = HashMap::new();
+                map.insert("macbook-pro".to_owned(), 1);
+                map
+            },
+            local_host_index: Some(0),
+            status_note: "hid++ ready".to_owned(),
+            options_status: "options+ ipc unavailable".to_owned(),
+            hidpp_status: "hid++ ready".to_owned(),
+        };
+        assert_eq!(
+            handoff.preferred_transport_for_peer("macbook-pro"),
+            HandoffTransport::Logi
+        );
+        assert!(!handoff.can_switch_to_peer("missing-peer"));
     }
 }
