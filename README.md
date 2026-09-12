@@ -41,6 +41,8 @@ This writes config, connects to the server, and starts the client automatically.
 
 Edge crossing switches ownership automatically while the daemon keeps running: the active machine receives input, and the inactive machine does not. Control is exclusive, not mirrored.
 
+Switch matrix (server perspective): right -> client returns on left, left -> return on right, above -> return on bottom, below -> return on top. Behavior is symmetric when roles swap: whichever machine owns physical input is the server for that run.
+
 Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
 
 Stop hop with Ctrl+C in each machine terminal; hop prints `hop stopped; local input restored` and releases local input.

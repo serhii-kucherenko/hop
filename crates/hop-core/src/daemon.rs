@@ -1071,33 +1071,49 @@ mod tests {
     }
 
     #[test]
-    fn return_edge_detector_requires_edge_and_outbound_push() {
+    fn return_edge_detector_requires_edge_and_outbound_push_for_all_edges() {
         let screen = ScreenSize {
             width: 1920,
             height: 1080,
         };
-        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        let scenarios = [
+            (
+                Edge::Left,
+                CursorPosition { x: 1, y: 500 },
+                CursorPosition { x: 0, y: 500 },
+                InputEvent::MouseMove { dx: 3, dy: 0 },
+                InputEvent::MouseMove { dx: -3, dy: 0 },
+            ),
+            (
+                Edge::Right,
+                CursorPosition { x: 1918, y: 500 },
+                CursorPosition { x: 1919, y: 500 },
+                InputEvent::MouseMove { dx: -3, dy: 0 },
+                InputEvent::MouseMove { dx: 3, dy: 0 },
+            ),
+            (
+                Edge::Top,
+                CursorPosition { x: 500, y: 1 },
+                CursorPosition { x: 500, y: 0 },
+                InputEvent::MouseMove { dx: 0, dy: 3 },
+                InputEvent::MouseMove { dx: 0, dy: -3 },
+            ),
+            (
+                Edge::Bottom,
+                CursorPosition { x: 500, y: 1078 },
+                CursorPosition { x: 500, y: 1079 },
+                InputEvent::MouseMove { dx: 0, dy: -3 },
+                InputEvent::MouseMove { dx: 0, dy: 3 },
+            ),
+        ];
 
-        assert!(!detector.should_release(
-            CursorPosition { x: 1, y: 500 },
-            screen,
-            &InputEvent::MouseMove { dx: -8, dy: 0 },
-        ));
-        assert!(!detector.should_release(
-            CursorPosition { x: 0, y: 500 },
-            screen,
-            &InputEvent::MouseMove { dx: 5, dy: 0 },
-        ));
-        assert!(!detector.should_release(
-            CursorPosition { x: 0, y: 500 },
-            screen,
-            &InputEvent::MouseMove { dx: -5, dy: 0 },
-        ));
-        assert!(detector.should_release(
-            CursorPosition { x: 0, y: 500 },
-            screen,
-            &InputEvent::MouseMove { dx: -6, dy: 0 },
-        ));
+        for (edge, off_edge, on_edge, inbound, outbound) in scenarios {
+            let mut detector = ReturnEdgeDetector::new(edge);
+            assert!(!detector.should_release(off_edge, screen, &outbound));
+            assert!(!detector.should_release(on_edge, screen, &inbound));
+            assert!(!detector.should_release(on_edge, screen, &outbound));
+            assert!(detector.should_release(on_edge, screen, &outbound));
+        }
     }
 
     #[tokio::test]
