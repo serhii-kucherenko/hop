@@ -58,6 +58,7 @@ pub fn permission_status() -> PermissionStatus {
 struct WindowsCaptureState {
     events: Mutex<VecDeque<InputEvent>>,
     last_mouse_point: Mutex<Option<(i32, i32)>>,
+    remote_focus_active: AtomicBool,
 }
 
 impl WindowsCaptureState {
@@ -65,6 +66,7 @@ impl WindowsCaptureState {
         Self {
             events: Mutex::new(VecDeque::with_capacity(256)),
             last_mouse_point: Mutex::new(None),
+            remote_focus_active: AtomicBool::new(false),
         }
     }
 
@@ -87,6 +89,22 @@ impl WindowsCaptureState {
             drained.push(event);
         }
         Ok(drained)
+    }
+
+    fn set_remote_focus(&self, active: bool) {
+        self.remote_focus_active.store(active, Ordering::SeqCst);
+        if !active {
+            if let Ok(mut queue) = self.events.lock() {
+                queue.clear();
+            }
+        }
+        if let Ok(mut last_point) = self.last_mouse_point.lock() {
+            *last_point = None;
+        }
+    }
+
+    fn remote_focus_active(&self) -> bool {
+        self.remote_focus_active.load(Ordering::SeqCst)
     }
 
     fn record_mouse_move(&self, point: POINT) -> Option<InputEvent> {
@@ -158,6 +176,11 @@ impl LocalInputCapture for WindowsInputCapture {
 
     fn poll_input_events(&mut self) -> Result<Vec<InputEvent>> {
         self.state.drain_events()
+    }
+
+    fn set_remote_focus(&mut self, active: bool) -> Result<()> {
+        self.state.set_remote_focus(active);
+        Ok(())
     }
 }
 
@@ -361,10 +384,12 @@ fn run_hook_loop(startup_tx: &mpsc::SyncSender<Result<u32, String>>) -> Result<(
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let mut should_block = false;
     if code == HC_ACTION as i32 {
         if let Some(state) = CAPTURE_STATE.get() {
             let hook = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
             if (hook.flags & LLMHF_INJECTED) == 0 {
+                should_block = state.remote_focus_active();
                 let message = wparam.0 as u32;
                 if let Some(event) = mouse_event_from_hook(state, message, hook) {
                     state.push_event(event);
@@ -373,6 +398,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         }
     }
 
+    if should_block {
+        return LRESULT(1);
+    }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
@@ -420,12 +448,14 @@ fn mouse_event_from_hook(
 }
 
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let mut should_block = false;
     if code == HC_ACTION as i32 {
         if let Some(state) = CAPTURE_STATE.get() {
             let hook = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
             let injected =
                 hook.flags.contains(LLKHF_INJECTED) || hook.flags.contains(LLKHF_LOWER_IL_INJECTED);
             if !injected {
+                should_block = state.remote_focus_active();
                 let message = wparam.0 as u32;
                 if let Some(event) = keyboard_event_from_hook(message, hook) {
                     state.push_event(event);
@@ -434,6 +464,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         }
     }
 
+    if should_block {
+        return LRESULT(1);
+    }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 

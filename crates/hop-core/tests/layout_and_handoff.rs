@@ -1,7 +1,7 @@
 use hop_core::handoff::{FocusState, HandoffAction, HandoffController};
 use hop_core::layout::{
-    detect_edge_crossing, CursorPosition, RelativePosition, ScreenSize, SpatialLayout,
-    SpatialNeighbor,
+    detect_edge_crossing, edge_for_peer_position, invert_relative_position, CursorPosition,
+    RelativePosition, ScreenSize, SpatialLayout, SpatialNeighbor,
 };
 use hop_protocol::control::Edge;
 use hop_protocol::datagram::InputEvent;
@@ -198,6 +198,32 @@ fn sticky_handoff_supports_left_top_and_bottom_edges() {
                 target_machine: "windows-box".to_owned(),
                 edge: expected_edge,
             }
+        );
+    }
+}
+
+#[test]
+fn return_edge_matches_peer_position() {
+    assert_eq!(edge_for_peer_position(RelativePosition::Left), Edge::Left);
+    assert_eq!(edge_for_peer_position(RelativePosition::Right), Edge::Right);
+    assert_eq!(edge_for_peer_position(RelativePosition::Above), Edge::Top);
+    assert_eq!(
+        edge_for_peer_position(RelativePosition::Below),
+        Edge::Bottom
+    );
+}
+
+#[test]
+fn invert_layout_position_round_trips() {
+    for position in [
+        RelativePosition::Left,
+        RelativePosition::Right,
+        RelativePosition::Above,
+        RelativePosition::Below,
+    ] {
+        assert_eq!(
+            invert_relative_position(invert_relative_position(position)),
+            position
         );
     }
 }

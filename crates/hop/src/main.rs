@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
 use hop_core::config::{Config, LocalConfig, PeerConfig};
 use hop_core::daemon;
-use hop_core::layout::{RelativePosition, ScreenSize};
+use hop_core::layout::{invert_relative_position, RelativePosition, ScreenSize};
 use hop_core::platform::{build_platform_adapters, permission_status, PermissionStatus};
 use hop_protocol::control::NodeRole;
 use rand::rngs::OsRng;
@@ -390,7 +390,7 @@ async fn run_pair_client(
         local_data_port,
     )
     .await?;
-    let server_position = invert_position(pair_result.client_position);
+    let server_position = invert_relative_position(pair_result.client_position);
     config.local.shared_secret = pair_result.shared_secret;
     config.peers = vec![PeerConfig {
         machine_name: pair_result.server_machine_name,
@@ -684,15 +684,6 @@ fn position_to_relative(position: PositionArg) -> RelativePosition {
         PositionArg::Right => RelativePosition::Right,
         PositionArg::Above => RelativePosition::Above,
         PositionArg::Below => RelativePosition::Below,
-    }
-}
-
-fn invert_position(position: RelativePosition) -> RelativePosition {
-    match position {
-        RelativePosition::Left => RelativePosition::Right,
-        RelativePosition::Right => RelativePosition::Left,
-        RelativePosition::Above => RelativePosition::Below,
-        RelativePosition::Below => RelativePosition::Above,
     }
 }
 
@@ -1129,19 +1120,19 @@ mod tests {
     #[test]
     fn invert_position_is_correct() {
         assert_eq!(
-            invert_position(RelativePosition::Left),
+            invert_relative_position(RelativePosition::Left),
             RelativePosition::Right
         );
         assert_eq!(
-            invert_position(RelativePosition::Right),
+            invert_relative_position(RelativePosition::Right),
             RelativePosition::Left
         );
         assert_eq!(
-            invert_position(RelativePosition::Above),
+            invert_relative_position(RelativePosition::Above),
             RelativePosition::Below
         );
         assert_eq!(
-            invert_position(RelativePosition::Below),
+            invert_relative_position(RelativePosition::Below),
             RelativePosition::Above
         );
     }

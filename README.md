@@ -39,7 +39,9 @@ This writes config, connects to the server, and starts the client automatically.
 
 4. Push into the configured edge on the server machine (sticky edge handoff). You do not need to move beyond the display bounds.
 
-Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; moving left from the Mac returns control. Override with `hop pair --position <left|right|above|below>` if needed.
+When handoff is active, control is exclusive: input is forwarded to the remote machine instead of being mirrored on both machines.
+
+Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
 
 Default config path:
 - Unix/macOS: `~/.config/hop/config.json` (or `$XDG_CONFIG_HOME/hop/config.json`)
