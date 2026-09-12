@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,6 +18,9 @@ use hop_protocol::datagram::{InputEvent, MouseButton};
 
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode};
+use crate::platform::macos_input::{
+    ClickCountTracker, InputPoint, ModifierFlagsState, ModifierSnapshot,
+};
 use crate::platform::{
     CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
     ScreenInfoProvider,
@@ -49,6 +52,10 @@ pub fn permission_status() -> PermissionStatus {
 
 const MAX_QUEUED_EVENTS: usize = 2_048;
 const TAP_START_TIMEOUT: Duration = Duration::from_secs(2);
+const VIRTUAL_CURSOR_RESYNC_IDLE_THRESHOLD: Duration = Duration::from_millis(250);
+const OTHER_MOUSE_BUTTON_MIDDLE: i64 = 2;
+const OTHER_MOUSE_BUTTON_X1: i64 = 3;
+const OTHER_MOUSE_BUTTON_X2: i64 = 4;
 
 struct MacosCaptureState {
     events: Mutex<VecDeque<InputEvent>>,
@@ -154,6 +161,8 @@ struct MouseButtonsDown {
     left: bool,
     right: bool,
     middle: bool,
+    x1: bool,
+    x2: bool,
 }
 
 impl MouseButtonsDown {
@@ -162,7 +171,13 @@ impl MouseButtonsDown {
             MouseButton::Left => self.left = pressed,
             MouseButton::Right => self.right = pressed,
             MouseButton::Middle => self.middle = pressed,
+            MouseButton::X1 => self.x1 = pressed,
+            MouseButton::X2 => self.x2 = pressed,
         }
+    }
+
+    fn any_pressed(&self) -> bool {
+        self.left || self.right || self.middle || self.x1 || self.x2
     }
 }
 
@@ -172,6 +187,10 @@ struct MacosInputInjector {
     backing_scale_x: f64,
     backing_scale_y: f64,
     last_move_at: Option<Instant>,
+    modifier_flags: ModifierFlagsState,
+    unknown_wire_keycodes: HashSet<u16>,
+    click_tracker: ClickCountTracker,
+    click_clock_start: Instant,
 }
 
 impl MacosInputInjector {
@@ -182,11 +201,17 @@ impl MacosInputInjector {
                 left: false,
                 right: false,
                 middle: false,
+                x1: false,
+                x2: false,
             },
             virtual_cursor: None,
             backing_scale_x,
             backing_scale_y,
             last_move_at: None,
+            modifier_flags: ModifierFlagsState::default(),
+            unknown_wire_keycodes: HashSet::new(),
+            click_tracker: ClickCountTracker::default(),
+            click_clock_start: Instant::now(),
         }
     }
 
@@ -217,14 +242,22 @@ impl MacosInputInjector {
         button: CGMouseButton,
         point: CGPoint,
         delta: Option<(i64, i64)>,
+        click_state: Option<i64>,
+        other_button_number: Option<i64>,
     ) -> Result<()> {
         let source =
             create_event_source().ok_or_else(|| anyhow!("failed to create CGEventSource"))?;
-        let mut event = CGEvent::new_mouse_event(source, event_type, point, button)
+        let event = CGEvent::new_mouse_event(source, event_type, point, button)
             .map_err(|_| anyhow!("failed to build macOS mouse event"))?;
         if let Some((delta_x, delta_y)) = delta {
             event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, delta_x);
             event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, delta_y);
+        }
+        if let Some(click_state) = click_state {
+            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+        }
+        if let Some(button_number) = other_button_number {
+            event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
         }
         event.post(CGEventTapLocation::HID);
         Ok(())
@@ -232,10 +265,10 @@ impl MacosInputInjector {
 
     fn maybe_resync_virtual_cursor(&mut self, now: Instant) -> Result<()> {
         let should_resync = match self.last_move_at {
-            Some(last) => now.duration_since(last) > Duration::from_millis(40),
-            None => true,
+            Some(last) => now.duration_since(last) > VIRTUAL_CURSOR_RESYNC_IDLE_THRESHOLD,
+            None => self.virtual_cursor.is_none(),
         };
-        if should_resync {
+        if should_resync && !self.buttons_down.any_pressed() {
             self.virtual_cursor = Some(self.current_cursor_location()?);
         }
         Ok(())
@@ -277,38 +310,95 @@ impl RemoteInputInjector for MacosInputInjector {
                     button,
                     target,
                     Some((scaled_dx.round() as i64, scaled_dy.round() as i64)),
+                    None,
+                    None,
                 )?;
                 self.last_move_at = Some(now);
             }
             InputEvent::MouseButton { button, pressed } => {
                 let current = self.virtual_cursor_or_system()?;
-                let (event_type, native_button) = match (button, pressed) {
-                    (MouseButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left),
-                    (MouseButton::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
+                let now = self.click_clock_start.elapsed();
+                let point = InputPoint {
+                    x: current.x,
+                    y: current.y,
+                };
+                let click_state = match button {
+                    MouseButton::Left | MouseButton::Right | MouseButton::Middle => Some(
+                        self.click_tracker
+                            .click_state_for_event(*button, *pressed, point, now),
+                    ),
+                    MouseButton::X1 | MouseButton::X2 => None,
+                };
+
+                let (event_type, native_button, other_button_number) = match (button, pressed) {
+                    (MouseButton::Left, true) => {
+                        (CGEventType::LeftMouseDown, CGMouseButton::Left, None)
+                    }
+                    (MouseButton::Left, false) => {
+                        (CGEventType::LeftMouseUp, CGMouseButton::Left, None)
+                    }
                     (MouseButton::Right, true) => {
-                        (CGEventType::RightMouseDown, CGMouseButton::Right)
+                        (CGEventType::RightMouseDown, CGMouseButton::Right, None)
                     }
                     (MouseButton::Right, false) => {
-                        (CGEventType::RightMouseUp, CGMouseButton::Right)
+                        (CGEventType::RightMouseUp, CGMouseButton::Right, None)
                     }
-                    (MouseButton::Middle, true) => {
-                        (CGEventType::OtherMouseDown, CGMouseButton::Center)
-                    }
-                    (MouseButton::Middle, false) => {
-                        (CGEventType::OtherMouseUp, CGMouseButton::Center)
-                    }
+                    (MouseButton::Middle, true) => (
+                        CGEventType::OtherMouseDown,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_MIDDLE),
+                    ),
+                    (MouseButton::Middle, false) => (
+                        CGEventType::OtherMouseUp,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_MIDDLE),
+                    ),
+                    (MouseButton::X1, true) => (
+                        CGEventType::OtherMouseDown,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_X1),
+                    ),
+                    (MouseButton::X1, false) => (
+                        CGEventType::OtherMouseUp,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_X1),
+                    ),
+                    (MouseButton::X2, true) => (
+                        CGEventType::OtherMouseDown,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_X2),
+                    ),
+                    (MouseButton::X2, false) => (
+                        CGEventType::OtherMouseUp,
+                        CGMouseButton::Center,
+                        Some(OTHER_MOUSE_BUTTON_X2),
+                    ),
                 };
-                self.post_mouse_event(event_type, native_button, current, None)?;
+                self.post_mouse_event(
+                    event_type,
+                    native_button,
+                    current,
+                    None,
+                    click_state,
+                    other_button_number,
+                )?;
                 self.buttons_down.update(*button, *pressed);
             }
             InputEvent::Key { scancode, pressed } => {
                 let Some(mac_keycode) = wire_to_mac_keycode(*scancode) else {
+                    if self.unknown_wire_keycodes.insert(*scancode) {
+                        eprintln!(
+                            "macOS injector: missing wire_to_mac_keycode mapping for scancode 0x{scancode:04X}"
+                        );
+                    }
                     return Ok(());
                 };
                 let source = create_event_source()
                     .ok_or_else(|| anyhow!("failed to create CGEventSource"))?;
                 let key_event = CGEvent::new_keyboard_event(source, mac_keycode, *pressed)
                     .map_err(|_| anyhow!("failed to build macOS keyboard event"))?;
+                let snapshot = self.modifier_flags.apply_key_event(mac_keycode, *pressed);
+                key_event.set_flags(cg_event_flags_from_snapshot(snapshot));
                 key_event.post(CGEventTapLocation::HID);
             }
             InputEvent::Scroll { dx, dy } => {
@@ -542,18 +632,34 @@ fn handle_tap_event(state: &MacosCaptureState, event_type: CGEventType, event: &
             state.set_cursor(point_to_cursor(event.location()));
         }
         CGEventType::OtherMouseDown => {
-            if event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER) == 2 {
+            let button_number =
+                event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
+            let button = match button_number {
+                OTHER_MOUSE_BUTTON_MIDDLE => Some(MouseButton::Middle),
+                OTHER_MOUSE_BUTTON_X1 => Some(MouseButton::X1),
+                OTHER_MOUSE_BUTTON_X2 => Some(MouseButton::X2),
+                _ => None,
+            };
+            if let Some(button) = button {
                 state.push_event(InputEvent::MouseButton {
-                    button: MouseButton::Middle,
+                    button,
                     pressed: true,
                 });
             }
             state.set_cursor(point_to_cursor(event.location()));
         }
         CGEventType::OtherMouseUp => {
-            if event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER) == 2 {
+            let button_number =
+                event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
+            let button = match button_number {
+                OTHER_MOUSE_BUTTON_MIDDLE => Some(MouseButton::Middle),
+                OTHER_MOUSE_BUTTON_X1 => Some(MouseButton::X1),
+                OTHER_MOUSE_BUTTON_X2 => Some(MouseButton::X2),
+                _ => None,
+            };
+            if let Some(button) = button {
                 state.push_event(InputEvent::MouseButton {
-                    button: MouseButton::Middle,
+                    button,
                     pressed: false,
                 });
             }
@@ -622,6 +728,26 @@ fn modifier_flag_for_key(keycode: u16) -> Option<CGEventFlags> {
         57 => Some(CGEventFlags::CGEventFlagAlphaShift),
         _ => None,
     }
+}
+
+fn cg_event_flags_from_snapshot(snapshot: ModifierSnapshot) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if snapshot.command {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if snapshot.shift {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if snapshot.alternate {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if snapshot.control {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if snapshot.alpha_shift {
+        flags |= CGEventFlags::CGEventFlagAlphaShift;
+    }
+    flags
 }
 
 fn point_to_cursor(point: CGPoint) -> CursorPosition {

@@ -131,6 +131,8 @@ pub(crate) fn wire_to_mac_keycode(wire_keycode: u16) -> Option<u16> {
         0x26 => Some(126), // Up Arrow
         0x27 => Some(124), // Right Arrow
         0x28 => Some(125), // Down Arrow
+        0x2C => Some(105), // Print Screen -> F13 fallback
+        0x2D => Some(114), // Insert -> Help fallback
         0x2E => Some(117), // Delete
         0x2F => Some(114), // Help
         0x30 => Some(29),  // 0
@@ -205,6 +207,7 @@ pub(crate) fn wire_to_mac_keycode(wire_keycode: u16) -> Option<u16> {
         0x80 => Some(64),  // F17
         0x81 => Some(79),  // F18
         0x82 => Some(80),  // F19
+        0x90 => Some(71),  // Num Lock -> Keypad Clear fallback
         0xA0 => Some(56),  // Left Shift
         0xA1 => Some(60),  // Right Shift
         0xA2 => Some(59),  // Left Control
@@ -261,6 +264,13 @@ mod tests {
         assert_eq!(wire_to_mac_keycode(0x27), Some(124));
         assert_eq!(wire_to_mac_keycode(0x28), Some(125));
         assert_eq!(wire_to_mac_keycode(0x26), Some(126));
+    }
+
+    #[test]
+    fn wire_codes_include_common_windows_extended_keys() {
+        assert_eq!(wire_to_mac_keycode(0x2C), Some(105));
+        assert_eq!(wire_to_mac_keycode(0x2D), Some(114));
+        assert_eq!(wire_to_mac_keycode(0x90), Some(71));
     }
 
     #[test]
