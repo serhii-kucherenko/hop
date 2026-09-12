@@ -38,6 +38,12 @@ pub enum ControlMessage {
         to_machine: String,
         edge: Edge,
     },
+    HandoffStartAck {
+        from_machine: String,
+        to_machine: String,
+        accepted: bool,
+        reason: Option<String>,
+    },
     HandoffEnd {
         owner_machine: String,
     },

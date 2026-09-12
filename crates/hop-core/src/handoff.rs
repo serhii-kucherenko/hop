@@ -103,10 +103,14 @@ impl HandoffController {
         }
     }
 
+    pub fn force_local(&mut self) {
+        self.focus_state = FocusState::Local;
+        self.sticky_edge = None;
+    }
+
     pub fn on_remote_release(&mut self) -> HandoffAction {
         if matches!(self.focus_state, FocusState::Remote { .. }) {
-            self.focus_state = FocusState::Local;
-            self.sticky_edge = None;
+            self.force_local();
             return HandoffAction::End {
                 owner_machine: self.owner_machine.clone(),
             };

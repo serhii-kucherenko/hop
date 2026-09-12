@@ -1,27 +1,29 @@
 use std::net::SocketAddr;
-use std::sync::mpsc::{self, TryRecvError};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use hop_protocol::auth::{
     build_client_hello, build_client_proof, build_server_challenge, derive_session_key,
     verify_client_proof, verify_server_challenge, AuthChallenge, AuthHello, AuthProof,
 };
 use hop_protocol::control::{ControlMessage, Edge, NodeRole, ScreenSize as WireScreenSize};
 use hop_protocol::crypto::CipherState;
-use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram};
+use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
 use hop_protocol::frame::{decode_control, decode_plain, encode_control, encode_plain};
 use rand::thread_rng;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::time::{Duration, MissedTickBehavior};
+use tokio::time::{timeout, Duration, Instant, MissedTickBehavior};
 
 use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
     edge_for_peer_position, CursorPosition, ScreenSize, SpatialLayout, SpatialNeighbor,
 };
-use crate::platform::{build_platform_adapters, LocalInputCapture};
+use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
+
+const STOPPED_MESSAGE: &str = "hop stopped; local input restored";
 
 pub async fn run(
     config: Config,
@@ -65,9 +67,294 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
             )
         })?;
 
-    let (mut stream, addr) = listener.accept().await.context("failed to accept client")?;
-    println!("control client connected from {addr}");
-    let (hello, cipher) =
+    loop {
+        let (stream, addr) = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("{STOPPED_MESSAGE}");
+                return Ok(());
+            }
+            accepted = listener.accept() => accepted.context("failed to accept client")?,
+        };
+        println!("control client connected from {addr}");
+        match run_server_session(
+            &config,
+            &mut adapters,
+            local_screen,
+            &udp_socket,
+            stream,
+            addr,
+        )
+        .await
+        {
+            Ok(ServerSessionControl::StopRequested) => {
+                println!("{STOPPED_MESSAGE}");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("server session ended: {error}");
+            }
+        }
+    }
+}
+
+async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
+    let peer = config.first_peer();
+    let mut adapters = build_platform_adapters();
+    let local_screen = adapters
+        .screen_provider
+        .screen_size()
+        .unwrap_or(ScreenSize {
+            width: config.local.screen_width,
+            height: config.local.screen_height,
+        });
+    let return_edge = edge_for_peer_position(peer.position);
+    let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
+    println!(
+        "starting hop client; connecting control {} and listening data {}",
+        peer.control_addr, config.local.data_bind
+    );
+
+    let udp_port = parse_port(&config.local.data_bind)?;
+    let udp_socket = UdpSocket::bind(&config.local.data_bind)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind local data socket {}",
+                config.local.data_bind
+            )
+        })?;
+    println!("awaiting encrypted input datagrams...");
+
+    let mut datagram_buffer = vec![0_u8; 4096];
+    let mut latency_tracker = LatencyTracker::new(log_latency);
+    'reconnect: loop {
+        let mut stream = match tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("{STOPPED_MESSAGE}");
+                return Ok(());
+            }
+            result = connect_client_control(&peer.control_addr) => result
+        } {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("failed to connect control channel: {error}; retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let (_hello, mut cipher) = match tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("{STOPPED_MESSAGE}");
+                return Ok(());
+            }
+            result = complete_client_auth(
+                &mut stream,
+                config.local.shared_secret.as_bytes(),
+                &config.local.machine_name,
+                udp_port,
+            ) => result
+        } {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("control channel auth failed: {error}; retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        println!("control connection established and authenticated");
+
+        let server_hello = loop {
+            match recv_control_message(&mut stream, &mut cipher).await {
+                Ok(Some(message)) => break message,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "failed to receive server hello on control channel: {error}; reconnecting"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue 'reconnect;
+                }
+            }
+        };
+        println!("server info: {server_hello:?}");
+
+        let mut handoff_active = false;
+        let mut owner_machine = peer.machine_name.clone();
+        let mut reconnect_required = false;
+        while !reconnect_required {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("{STOPPED_MESSAGE}");
+                    return Ok(());
+                }
+                result = recv_control_message(&mut stream, &mut cipher) => {
+                    let message = match result {
+                        Ok(Some(message)) => message,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            eprintln!("control channel read failed: {error}; reconnecting");
+                            handoff_active = false;
+                            reconnect_required = true;
+                            continue;
+                        }
+                    };
+                    match message {
+                        ControlMessage::HandoffStart {
+                            from_machine,
+                            to_machine,
+                            edge,
+                        } => {
+                            let accepted = to_machine == config.local.machine_name;
+                            let reason = if accepted {
+                                None
+                            } else {
+                                Some(format!(
+                                    "handoff target {} does not match {}",
+                                    to_machine, config.local.machine_name
+                                ))
+                            };
+                            let ack = ControlMessage::HandoffStartAck {
+                                from_machine: config.local.machine_name.clone(),
+                                to_machine: to_machine.clone(),
+                                accepted,
+                                reason: reason.clone(),
+                            };
+                            if let Err(error) = send_control_message(&mut stream, &mut cipher, &ack).await {
+                                eprintln!("failed to send handoff ACK: {error}; reconnecting");
+                                handoff_active = false;
+                                reconnect_required = true;
+                                continue;
+                            }
+                            if accepted {
+                                handoff_active = true;
+                                owner_machine = from_machine.clone();
+                                return_edge_detector.reset();
+                                println!(
+                                    "handoff begin: from={} to={} edge={:?}; enabling client injection",
+                                    from_machine, to_machine, edge
+                                );
+                            } else {
+                                handoff_active = false;
+                                return_edge_detector.reset();
+                                println!(
+                                    "handoff start rejected: from={} to={} edge={:?}; reason={}",
+                                    from_machine,
+                                    to_machine,
+                                    edge,
+                                    reason.unwrap_or_else(|| "unknown".to_owned())
+                                );
+                            }
+                        }
+                        ControlMessage::HandoffEnd { owner_machine } => {
+                            handoff_active = false;
+                            return_edge_detector.reset();
+                            println!("handoff end: owner={owner_machine}; disabling client injection");
+                        }
+                        ControlMessage::Ping { at_millis } => {
+                            let pong = ControlMessage::Pong { at_millis };
+                            if let Err(error) = send_control_message(&mut stream, &mut cipher, &pong).await {
+                                eprintln!("failed to reply with pong: {error}; reconnecting");
+                                handoff_active = false;
+                                reconnect_required = true;
+                            }
+                        }
+                        other => println!("control message: {other:?}"),
+                    }
+                }
+                datagram = udp_socket.recv_from(&mut datagram_buffer) => {
+                    let (len, _) = match datagram {
+                        Ok(parts) => parts,
+                        Err(error) => {
+                            eprintln!("failed to receive input datagram: {error}");
+                            continue;
+                        }
+                    };
+                    if len == 0 {
+                        continue;
+                    }
+                    let payload = &datagram_buffer[..len];
+                    match decode_datagram(&mut cipher, payload) {
+                        Ok(message) => {
+                            if !handoff_active {
+                                continue;
+                            }
+
+                            match adapters.input_capture.poll_cursor_position() {
+                                Ok(Some(cursor))
+                                    if return_edge_detector.should_release(
+                                        cursor,
+                                        local_screen,
+                                        &message.event,
+                                    ) =>
+                                {
+                                    let handoff_end = ControlMessage::HandoffEnd {
+                                        owner_machine: owner_machine.clone(),
+                                    };
+                                    match send_control_message(&mut stream, &mut cipher, &handoff_end).await {
+                                        Ok(()) => {
+                                            handoff_active = false;
+                                            return_edge_detector.reset();
+                                            println!(
+                                                "handoff end sent from client on {:?} return edge",
+                                                return_edge
+                                            );
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            eprintln!("failed to send handoff end: {error}; reconnecting");
+                                            handoff_active = false;
+                                            reconnect_required = true;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                Ok(Some(_)) | Ok(None) => {}
+                                Err(error) => {
+                                    eprintln!("failed to poll cursor for return edge: {error}");
+                                }
+                            }
+
+                            latency_tracker.observe(message.sent_at_micros);
+                            match catch_unwind(AssertUnwindSafe(|| {
+                                adapters.input_injector.inject_event(&message.event)
+                            })) {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    eprintln!("input injection failed; continuing: {error}");
+                                }
+                                Err(_) => {
+                                    eprintln!("input injection panicked; continuing client loop");
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("dropping invalid input datagram: {error}");
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("reconnecting control channel to {}", peer.control_addr);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("{STOPPED_MESSAGE}");
+                return Ok(());
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+async fn run_server_session(
+    config: &Config,
+    adapters: &mut crate::platform::PlatformAdapters,
+    local_screen: ScreenSize,
+    udp_socket: &UdpSocket,
+    mut stream: TcpStream,
+    addr: SocketAddr,
+) -> anyhow::Result<ServerSessionControl> {
+    let (hello, mut cipher) =
         complete_server_auth(&mut stream, config.local.shared_secret.as_bytes()).await?;
     println!("authenticated peer machine {}", hello.machine_name);
     let peer_data_addr = SocketAddr::new(addr.ip(), hello.udp_port);
@@ -92,262 +379,380 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
             height: local_screen.height,
         },
     };
-    let mut send_cipher = cipher;
-    send_control_message(&mut stream, &mut send_cipher, &hello_msg).await?;
+    send_control_message(&mut stream, &mut cipher, &hello_msg).await?;
     println!("control channel encrypted and ready");
 
-    let (mut control_reader, mut control_writer) = stream.into_split();
-    let mut recv_cipher = send_cipher.clone();
-    let (control_tx, control_rx) = mpsc::channel::<anyhow::Result<ControlMessage>>();
-    tokio::spawn(async move {
-        loop {
-            match recv_control_message(&mut control_reader, &mut recv_cipher).await {
-                Ok(Some(message)) => {
-                    if control_tx.send(Ok(message)).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = control_tx.send(Err(error));
-                    break;
-                }
-            }
-        }
-    });
-
     let mut handoff = HandoffController::new(config.local.machine_name.clone());
+    let mut handoff_committed = false;
+    let mut cursor_hidden = false;
     let mut ticker = tokio::time::interval(Duration::from_millis(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        ticker.tick().await;
-
-        loop {
-            match control_rx.try_recv() {
-                Ok(Ok(ControlMessage::HandoffEnd { owner_machine })) => {
-                    if owner_machine != config.local.machine_name {
-                        println!("handoff end ignored: owner={owner_machine}");
-                        continue;
-                    }
-                    restore_local_focus(&mut adapters, &mut handoff, local_screen)?;
-                    println!("handoff end: owner={owner_machine}; restoring local control");
-                }
-                Ok(Ok(other)) => {
-                    println!("control message ignored on server: {other:?}");
-                }
-                Ok(Err(error)) => {
-                    let _ = restore_local_focus(&mut adapters, &mut handoff, local_screen);
-                    return Err(error).context("control channel receive failed");
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    let _ = restore_local_focus(&mut adapters, &mut handoff, local_screen);
-                    return Err(anyhow!("control channel disconnected"));
-                }
-            }
-        }
-
-        let pending_events = adapters.input_capture.poll_input_events()?;
-
-        if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
-            let action =
-                handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
-            if let HandoffAction::Begin {
-                target_machine,
-                edge,
-            } = action
-            {
-                activate_remote_focus(&mut adapters, edge, local_screen)?;
-                let message = ControlMessage::HandoffStart {
-                    from_machine: config.local.machine_name.clone(),
-                    to_machine: target_machine.clone(),
-                    edge,
-                };
-                if let Err(error) =
-                    send_control_message(&mut control_writer, &mut send_cipher, &message).await
-                {
-                    let _ = restore_local_focus(&mut adapters, &mut handoff, local_screen);
-                    return Err(error).context("failed to send handoff start");
-                }
-                println!(
-                    "handoff begin: from={} to={} edge={:?}",
-                    config.local.machine_name, target_machine, edge
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                recover_server_focus_local(
+                    &mut handoff,
+                    adapters.input_capture.as_mut(),
+                    adapters.cursor_controller.as_mut(),
+                    &mut cursor_hidden,
+                    local_screen,
+                    "shutdown requested",
                 );
+                return Ok(ServerSessionControl::StopRequested);
             }
-        }
+            _ = ticker.tick() => {
+                let pending_events = adapters.input_capture.poll_input_events()?;
 
-        if matches!(handoff.focus_state(), FocusState::Remote { .. }) {
-            for event in pending_events {
-                let datagram = InputDatagram {
-                    event,
-                    sent_at_micros: now_micros(),
-                };
-                let packet = encode_datagram(&mut send_cipher, &datagram)?;
-                udp_socket.send_to(&packet, peer_data_addr).await?;
+                if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
+                    let action =
+                        handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
+                    if let HandoffAction::Begin {
+                        target_machine,
+                        edge,
+                    } = action
+                    {
+                        let message = ControlMessage::HandoffStart {
+                            from_machine: config.local.machine_name.clone(),
+                            to_machine: target_machine.clone(),
+                            edge,
+                        };
+                        if let Err(error) = send_control_message(&mut stream, &mut cipher, &message).await {
+                            recover_server_focus_local(
+                                &mut handoff,
+                                adapters.input_capture.as_mut(),
+                                adapters.cursor_controller.as_mut(),
+                                &mut cursor_hidden,
+                                local_screen,
+                                &format!("failed to send handoff start: {error}"),
+                            );
+                            return Err(error);
+                        }
+                        println!(
+                            "handoff begin requested: from={} to={} edge={:?}",
+                            config.local.machine_name, target_machine, edge
+                        );
+
+                        let ack_result = await_handoff_start_ack(
+                            &mut stream,
+                            &mut cipher,
+                            &target_machine,
+                            Duration::from_millis(150),
+                        )
+                        .await;
+                        let ack_status = match ack_result {
+                            Ok(status) => status,
+                            Err(error) => {
+                                recover_server_focus_local(
+                                    &mut handoff,
+                                    adapters.input_capture.as_mut(),
+                                    adapters.cursor_controller.as_mut(),
+                                    &mut cursor_hidden,
+                                    local_screen,
+                                    &format!("failed while waiting for handoff ack: {error}"),
+                                );
+                                return Err(error);
+                            }
+                        };
+
+                        match ack_status {
+                            HandoffStartAckStatus::Accepted => {
+                                if let Err(error) = adapters.input_capture.set_remote_focus(true) {
+                                    recover_server_focus_local(
+                                        &mut handoff,
+                                        adapters.input_capture.as_mut(),
+                                        adapters.cursor_controller.as_mut(),
+                                        &mut cursor_hidden,
+                                        local_screen,
+                                        &format!("failed to enable remote input capture: {error}"),
+                                    );
+                                    handoff_committed = false;
+                                    send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
+                                    continue;
+                                }
+                                if let Err(error) = adapters.cursor_controller.hide_cursor() {
+                                    recover_server_focus_local(
+                                        &mut handoff,
+                                        adapters.input_capture.as_mut(),
+                                        adapters.cursor_controller.as_mut(),
+                                        &mut cursor_hidden,
+                                        local_screen,
+                                        &format!("failed to hide cursor after handoff ack: {error}"),
+                                    );
+                                    handoff_committed = false;
+                                    send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
+                                    continue;
+                                }
+                                cursor_hidden = true;
+                                if let Err(error) = adapters
+                                    .cursor_controller
+                                    .warp_cursor_to_safe_point(edge, local_screen)
+                                {
+                                    recover_server_focus_local(
+                                        &mut handoff,
+                                        adapters.input_capture.as_mut(),
+                                        adapters.cursor_controller.as_mut(),
+                                        &mut cursor_hidden,
+                                        local_screen,
+                                        &format!("failed to warp cursor after handoff ack: {error}"),
+                                    );
+                                    handoff_committed = false;
+                                    send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
+                                    continue;
+                                }
+                                handoff_committed = true;
+                                println!(
+                                    "handoff begin confirmed: from={} to={} edge={:?}",
+                                    config.local.machine_name, target_machine, edge
+                                );
+                            }
+                            HandoffStartAckStatus::Rejected(reason) => {
+                                let reason = reason.unwrap_or_else(|| "no reason provided".to_owned());
+                                recover_server_focus_local(
+                                    &mut handoff,
+                                    adapters.input_capture.as_mut(),
+                                    adapters.cursor_controller.as_mut(),
+                                    &mut cursor_hidden,
+                                    local_screen,
+                                    &format!("handoff ack rejected: {reason}"),
+                                );
+                                handoff_committed = false;
+                                send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
+                            }
+                            HandoffStartAckStatus::TimedOut => {
+                                recover_server_focus_local(
+                                    &mut handoff,
+                                    adapters.input_capture.as_mut(),
+                                    adapters.cursor_controller.as_mut(),
+                                    &mut cursor_hidden,
+                                    local_screen,
+                                    "handoff ack timed out",
+                                );
+                                handoff_committed = false;
+                                send_handoff_end(&mut stream, &mut cipher, &config.local.machine_name).await;
+                            }
+                        }
+                    }
+                }
+
+                if handoff_committed && matches!(handoff.focus_state(), FocusState::Remote { .. }) {
+                    for event in pending_events {
+                        let datagram = InputDatagram {
+                            event,
+                            sent_at_micros: now_micros(),
+                        };
+                        let packet = encode_datagram(&mut cipher, &datagram)?;
+                        if let Err(error) = udp_socket.send_to(&packet, peer_data_addr).await {
+                            recover_server_focus_local(
+                                &mut handoff,
+                                adapters.input_capture.as_mut(),
+                                adapters.cursor_controller.as_mut(),
+                                &mut cursor_hidden,
+                                local_screen,
+                                &format!("failed to forward input datagram: {error}"),
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+            result = recv_control_message(&mut stream, &mut cipher) => {
+                match result {
+                    Ok(Some(ControlMessage::HandoffStartAck { from_machine, to_machine, accepted, reason })) => {
+                        println!(
+                            "late handoff ack received: from={} to={} accepted={} reason={:?}",
+                            from_machine, to_machine, accepted, reason
+                        );
+                    }
+                    Ok(Some(ControlMessage::HandoffEnd { owner_machine })) => {
+                        if owner_machine == config.local.machine_name {
+                            recover_server_focus_local(
+                                &mut handoff,
+                                adapters.input_capture.as_mut(),
+                                adapters.cursor_controller.as_mut(),
+                                &mut cursor_hidden,
+                                local_screen,
+                                "handoff ended by remote peer",
+                            );
+                            handoff_committed = false;
+                        } else {
+                            println!("handoff end ignored for owner {owner_machine}");
+                        }
+                    }
+                    Ok(Some(ControlMessage::Ping { at_millis })) => {
+                        let pong = ControlMessage::Pong { at_millis };
+                        if let Err(error) = send_control_message(&mut stream, &mut cipher, &pong).await {
+                            recover_server_focus_local(
+                                &mut handoff,
+                                adapters.input_capture.as_mut(),
+                                adapters.cursor_controller.as_mut(),
+                                &mut cursor_hidden,
+                                local_screen,
+                                &format!("failed to send pong response: {error}"),
+                            );
+                            return Err(error);
+                        }
+                    }
+                    Ok(Some(other)) => println!("control message: {other:?}"),
+                    Ok(None) => {}
+                    Err(error) => {
+                        recover_server_focus_local(
+                            &mut handoff,
+                            adapters.input_capture.as_mut(),
+                            adapters.cursor_controller.as_mut(),
+                            &mut cursor_hidden,
+                            local_screen,
+                            &format!("control client disconnected: {error}"),
+                        );
+                        return Err(error);
+                    }
+                }
             }
         }
     }
 }
 
-async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
-    let peer = config.first_peer();
-    let mut adapters = build_platform_adapters();
-    let local_screen = adapters
-        .screen_provider
-        .screen_size()
-        .unwrap_or(ScreenSize {
-            width: config.local.screen_width,
-            height: config.local.screen_height,
-        });
-    let return_edge = edge_for_peer_position(peer.position);
-    let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
-    println!(
-        "starting hop client; connecting control {} and listening data {}",
-        peer.control_addr, config.local.data_bind
-    );
+enum ServerSessionControl {
+    StopRequested,
+}
 
-    let mut stream = {
-        let mut connected = None;
-        let mut last_error = None;
-        for attempt in 1..=20 {
-            match TcpStream::connect(&peer.control_addr).await {
-                Ok(stream) => {
-                    connected = Some(stream);
-                    break;
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                    if attempt < 20 {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                    }
-                }
-            }
-        }
-        match connected {
-            Some(stream) => stream,
-            None => {
-                let error = last_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_default();
-                anyhow::bail!(
-                    "failed to connect to server {}: {}",
-                    peer.control_addr,
-                    error
-                );
-            }
-        }
-    };
-    let udp_port = parse_port(&config.local.data_bind)?;
-    let (_hello, mut cipher) = complete_client_auth(
-        &mut stream,
-        config.local.shared_secret.as_bytes(),
-        &config.local.machine_name,
-        udp_port,
-    )
-    .await?;
-    println!("control connection established and authenticated");
+enum HandoffStartAckStatus {
+    Accepted,
+    Rejected(Option<String>),
+    TimedOut,
+}
 
-    let server_hello = loop {
-        if let Some(message) = recv_control_message(&mut stream, &mut cipher).await? {
-            break message;
-        }
-    };
-    println!("server info: {server_hello:?}");
-    let udp_socket = UdpSocket::bind(&config.local.data_bind)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to bind local data socket {}",
-                config.local.data_bind
-            )
-        })?;
-    println!("awaiting encrypted input datagrams...");
-
-    let mut datagram_buffer = vec![0_u8; 4096];
-    let mut latency_tracker = LatencyTracker::new(log_latency);
-    let mut handoff_active = false;
-    let mut owner_machine = peer.machine_name.clone();
+async fn await_handoff_start_ack(
+    stream: &mut TcpStream,
+    cipher: &mut CipherState,
+    target_machine: &str,
+    timeout_duration: Duration,
+) -> anyhow::Result<HandoffStartAckStatus> {
+    let deadline = Instant::now() + timeout_duration;
     loop {
-        tokio::select! {
-            result = recv_control_message(&mut stream, &mut cipher) => {
-                let Some(message) = result? else {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(HandoffStartAckStatus::TimedOut);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let response = timeout(remaining, recv_control_message(stream, cipher)).await;
+        let Some(message) = (match response {
+            Ok(result) => result?,
+            Err(_) => return Ok(HandoffStartAckStatus::TimedOut),
+        }) else {
+            continue;
+        };
+
+        match message {
+            ControlMessage::HandoffStartAck {
+                from_machine,
+                to_machine,
+                accepted,
+                reason,
+            } => {
+                if to_machine != target_machine {
+                    println!(
+                        "ignoring handoff ack for target {} from {} while waiting for {}",
+                        to_machine, from_machine, target_machine
+                    );
                     continue;
-                };
-                match message {
-                    ControlMessage::HandoffStart {
-                        from_machine,
-                        to_machine,
-                        edge,
-                    } => {
-                        if to_machine == config.local.machine_name {
-                            handoff_active = true;
-                            owner_machine = from_machine.clone();
-                            return_edge_detector.reset();
-                            println!(
-                                "handoff begin: from={} to={} edge={:?}; enabling client injection",
-                                from_machine, to_machine, edge
-                            );
-                        } else {
-                            println!(
-                                "handoff start ignored: from={} to={} edge={:?}",
-                                from_machine, to_machine, edge
-                            );
-                        }
-                    }
-                    ControlMessage::HandoffEnd { owner_machine: control_owner_machine } => {
-                        handoff_active = false;
-                        return_edge_detector.reset();
-                        println!("handoff end: owner={control_owner_machine}; disabling client injection");
-                    }
-                    other => println!("control message: {other:?}"),
                 }
+                if accepted {
+                    return Ok(HandoffStartAckStatus::Accepted);
+                }
+                return Ok(HandoffStartAckStatus::Rejected(reason));
             }
-            datagram = udp_socket.recv_from(&mut datagram_buffer) => {
-                let (len, _) = datagram?;
-                if len == 0 {
-                    continue;
-                }
-                let payload = &datagram_buffer[..len];
-                match decode_datagram(&mut cipher, payload) {
-                    Ok(message) => {
-                        if !handoff_active {
-                            continue;
-                        }
+            ControlMessage::Ping { at_millis } => {
+                let pong = ControlMessage::Pong { at_millis };
+                send_control_message(stream, cipher, &pong).await?;
+            }
+            other => {
+                println!("control message while awaiting handoff ack: {other:?}");
+            }
+        }
+    }
+}
 
-                        if let Some(cursor) = poll_cursor_position_for_return_edge(&mut *adapters.input_capture) {
-                            if return_edge_detector.should_release(cursor, local_screen, &message.event) {
-                                let handoff_end = ControlMessage::HandoffEnd {
-                                    owner_machine: owner_machine.clone(),
-                                };
-                                match send_control_message(&mut stream, &mut cipher, &handoff_end).await {
-                                    Ok(()) => {
-                                        handoff_active = false;
-                                        return_edge_detector.reset();
-                                        println!(
-                                            "handoff end sent from client on {:?} return edge",
-                                            return_edge
-                                        );
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        eprintln!("failed to send handoff end: {error}");
-                                    }
-                                }
-                            }
-                        }
-
-                        latency_tracker.observe(message.sent_at_micros);
-                        if let Err(error) = adapters.input_injector.inject_event(&message.event) {
-                            eprintln!("input injection failed: {error}");
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("dropping invalid input datagram: {error}");
-                    }
+async fn connect_client_control(control_addr: &str) -> anyhow::Result<TcpStream> {
+    let mut connected = None;
+    let mut last_error = None;
+    for attempt in 1..=20 {
+        match TcpStream::connect(control_addr).await {
+            Ok(stream) => {
+                connected = Some(stream);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 20 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
         }
+    }
+    match connected {
+        Some(stream) => Ok(stream),
+        None => {
+            let error = last_error
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            anyhow::bail!("failed to connect to server {}: {}", control_addr, error);
+        }
+    }
+}
+
+async fn send_handoff_end(stream: &mut TcpStream, cipher: &mut CipherState, owner_machine: &str) {
+    let message = ControlMessage::HandoffEnd {
+        owner_machine: owner_machine.to_owned(),
+    };
+    if let Err(error) = send_control_message(stream, cipher, &message).await {
+        eprintln!("failed to send handoff end message: {error}");
+    }
+}
+
+fn recover_server_focus_local(
+    handoff: &mut HandoffController,
+    input_capture: &mut dyn LocalInputCapture,
+    cursor_controller: &mut dyn CursorController,
+    cursor_hidden: &mut bool,
+    screen: ScreenSize,
+    reason: &str,
+) {
+    let release_edge = match handoff.focus_state() {
+        FocusState::Remote { edge, .. } => Some(*edge),
+        FocusState::Local => None,
+    };
+    let was_remote = release_edge.is_some();
+    handoff.force_local();
+    if let Err(error) = input_capture.set_remote_focus(false) {
+        eprintln!("failed to restore local input ownership: {error}");
+    }
+    if *cursor_hidden {
+        if let Err(error) = cursor_controller.show_cursor() {
+            eprintln!("failed to show cursor while recovering local focus: {error}");
+        } else {
+            *cursor_hidden = false;
+        }
+    }
+    if let Some(edge) = release_edge {
+        if let Err(error) = cursor_controller.warp_cursor_to_safe_point(opposite_edge(edge), screen)
+        {
+            eprintln!("failed to warp cursor while recovering local focus: {error}");
+        }
+    }
+    if was_remote {
+        eprintln!("focus recovered to local: {reason}");
+    } else {
+        eprintln!("handoff aborted: {reason}");
+    }
+}
+
+fn opposite_edge(edge: Edge) -> Edge {
+    match edge {
+        Edge::Left => Edge::Right,
+        Edge::Right => Edge::Left,
+        Edge::Top => Edge::Bottom,
+        Edge::Bottom => Edge::Top,
     }
 }
 
@@ -390,8 +795,8 @@ async fn complete_client_auth(
     Ok((challenge, CipherState::new(&session_key)))
 }
 
-async fn send_control_message<W: AsyncWrite + Unpin>(
-    stream: &mut W,
+async fn send_control_message(
+    stream: &mut TcpStream,
     cipher: &mut CipherState,
     message: &ControlMessage,
 ) -> anyhow::Result<()> {
@@ -399,8 +804,8 @@ async fn send_control_message<W: AsyncWrite + Unpin>(
     write_frame(stream, &payload).await
 }
 
-async fn recv_control_message<R: AsyncRead + Unpin>(
-    stream: &mut R,
+async fn recv_control_message(
+    stream: &mut TcpStream,
     cipher: &mut CipherState,
 ) -> anyhow::Result<Option<ControlMessage>> {
     let payload = read_frame(stream).await?;
@@ -413,14 +818,14 @@ async fn recv_control_message<R: AsyncRead + Unpin>(
     }
 }
 
-async fn write_frame<W: AsyncWrite + Unpin>(stream: &mut W, payload: &[u8]) -> anyhow::Result<()> {
+async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> anyhow::Result<()> {
     let len = payload.len() as u32;
     stream.write_u32(len).await?;
     stream.write_all(payload).await?;
     Ok(())
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<Vec<u8>> {
+async fn read_frame(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
     let len = stream.read_u32().await? as usize;
     if len > 1024 * 1024 {
         anyhow::bail!("refusing oversized frame ({len} bytes)");
@@ -428,61 +833,6 @@ async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<Vec<
     let mut payload = vec![0_u8; len];
     stream.read_exact(&mut payload).await?;
     Ok(payload)
-}
-
-fn activate_remote_focus(
-    adapters: &mut crate::platform::PlatformAdapters,
-    edge: Edge,
-    screen: ScreenSize,
-) -> anyhow::Result<()> {
-    adapters.input_capture.set_remote_focus(true)?;
-    adapters.cursor_controller.hide_cursor()?;
-    adapters
-        .cursor_controller
-        .warp_cursor_to_safe_point(edge, screen)?;
-    Ok(())
-}
-
-fn restore_local_focus(
-    adapters: &mut crate::platform::PlatformAdapters,
-    handoff: &mut HandoffController,
-    screen: ScreenSize,
-) -> anyhow::Result<()> {
-    let release_edge = match handoff.focus_state() {
-        FocusState::Remote { edge, .. } => Some(*edge),
-        FocusState::Local => None,
-    };
-
-    let _ = handoff.on_remote_release();
-    adapters.input_capture.set_remote_focus(false)?;
-    adapters.cursor_controller.show_cursor()?;
-    if let Some(edge) = release_edge {
-        adapters
-            .cursor_controller
-            .warp_cursor_to_safe_point(opposite_edge(edge), screen)?;
-    }
-    Ok(())
-}
-
-fn opposite_edge(edge: Edge) -> Edge {
-    match edge {
-        Edge::Left => Edge::Right,
-        Edge::Right => Edge::Left,
-        Edge::Top => Edge::Bottom,
-        Edge::Bottom => Edge::Top,
-    }
-}
-
-fn poll_cursor_position_for_return_edge(
-    input_capture: &mut dyn LocalInputCapture,
-) -> Option<CursorPosition> {
-    match input_capture.poll_cursor_position() {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            eprintln!("failed to query cursor position for return edge: {error}");
-            None
-        }
-    }
 }
 
 fn parse_port(bind_addr: &str) -> anyhow::Result<u16> {
@@ -522,9 +872,9 @@ impl ReturnEdgeDetector {
         &mut self,
         cursor: CursorPosition,
         screen: ScreenSize,
-        event: &hop_protocol::datagram::InputEvent,
+        event: &InputEvent,
     ) -> bool {
-        let hop_protocol::datagram::InputEvent::MouseMove { dx, dy } = event else {
+        let InputEvent::MouseMove { dx, dy } = event else {
             return false;
         };
 
@@ -622,5 +972,199 @@ impl LatencyTracker {
         self.total_micros = 0;
         self.max_micros = 0;
         self.next_report_at_micros = now.saturating_add(1_000_000);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::layout::{CursorPosition, RelativePosition};
+    use crate::platform::{CursorController, LocalInputCapture};
+    use hop_protocol::control::Edge;
+    use hop_protocol::datagram::InputEvent;
+
+    #[derive(Default)]
+    struct TestCursorController {
+        show_calls: usize,
+    }
+
+    impl CursorController for TestCursorController {
+        fn hide_cursor(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> anyhow::Result<()> {
+            self.show_calls += 1;
+            Ok(())
+        }
+
+        fn warp_cursor_to_safe_point(
+            &mut self,
+            _edge: Edge,
+            _screen: ScreenSize,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestInputCapture {
+        remote_focus_updates: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl LocalInputCapture for TestInputCapture {
+        fn poll_cursor_position(&mut self) -> anyhow::Result<Option<CursorPosition>> {
+            Ok(None)
+        }
+
+        fn poll_input_events(&mut self) -> anyhow::Result<Vec<InputEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn set_remote_focus(&mut self, active: bool) -> anyhow::Result<()> {
+            self.remote_focus_updates
+                .lock()
+                .expect("lock focus updates")
+                .push(active);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recover_server_focus_local_clears_remote_and_shows_cursor() {
+        let mut handoff = HandoffController::new("macbook-pro");
+        let screen = ScreenSize {
+            width: 1920,
+            height: 1080,
+        };
+        let layout = SpatialLayout::new(vec![SpatialNeighbor {
+            machine_name: "windows-box".to_owned(),
+            position: RelativePosition::Right,
+        }]);
+        let action =
+            handoff.on_local_cursor(CursorPosition { x: 1921, y: 200 }, screen, &layout, &[]);
+        assert!(matches!(action, HandoffAction::Begin { .. }));
+
+        let mut input_capture = TestInputCapture::default();
+        let mut cursor_controller = TestCursorController::default();
+        let mut cursor_hidden = true;
+        recover_server_focus_local(
+            &mut handoff,
+            &mut input_capture,
+            &mut cursor_controller,
+            &mut cursor_hidden,
+            screen,
+            "control disconnect",
+        );
+
+        assert!(matches!(handoff.focus_state(), FocusState::Local));
+        assert!(!cursor_hidden);
+        assert_eq!(cursor_controller.show_calls, 1);
+        let focus_updates = input_capture
+            .remote_focus_updates
+            .lock()
+            .expect("lock focus updates")
+            .clone();
+        assert_eq!(focus_updates, vec![false]);
+    }
+
+    #[test]
+    fn return_edge_detector_requires_edge_and_outbound_push() {
+        let screen = ScreenSize {
+            width: 1920,
+            height: 1080,
+        };
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+
+        assert!(!detector.should_release(
+            CursorPosition { x: 1, y: 500 },
+            screen,
+            &InputEvent::MouseMove { dx: -8, dy: 0 },
+        ));
+        assert!(!detector.should_release(
+            CursorPosition { x: 0, y: 500 },
+            screen,
+            &InputEvent::MouseMove { dx: 5, dy: 0 },
+        ));
+        assert!(!detector.should_release(
+            CursorPosition { x: 0, y: 500 },
+            screen,
+            &InputEvent::MouseMove { dx: -5, dy: 0 },
+        ));
+        assert!(detector.should_release(
+            CursorPosition { x: 0, y: 500 },
+            screen,
+            &InputEvent::MouseMove { dx: -6, dy: 0 },
+        ));
+    }
+
+    #[tokio::test]
+    async fn handoff_ack_times_out_when_client_does_not_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_task =
+            tokio::spawn(async move { TcpStream::connect(addr).await.expect("connect") });
+        let (mut server_stream, _) = listener.accept().await.expect("accept");
+        let _client_stream = client_task.await.expect("join");
+
+        let mut server_cipher = CipherState::new(&[7_u8; 32]);
+        let status = await_handoff_start_ack(
+            &mut server_stream,
+            &mut server_cipher,
+            "macbook-pro",
+            Duration::from_millis(30),
+        )
+        .await
+        .expect("await handoff ack");
+        assert!(matches!(status, HandoffStartAckStatus::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn handoff_ack_ignores_other_target_then_accepts_matching_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_task =
+            tokio::spawn(async move { TcpStream::connect(addr).await.expect("connect") });
+        let (mut server_stream, _) = listener.accept().await.expect("accept");
+        let mut client_stream = client_task.await.expect("join");
+
+        let mut client_cipher = CipherState::new(&[9_u8; 32]);
+        send_control_message(
+            &mut client_stream,
+            &mut client_cipher,
+            &ControlMessage::HandoffStartAck {
+                from_machine: "macbook-pro".to_owned(),
+                to_machine: "other-target".to_owned(),
+                accepted: true,
+                reason: None,
+            },
+        )
+        .await
+        .expect("send wrong-target ack");
+        send_control_message(
+            &mut client_stream,
+            &mut client_cipher,
+            &ControlMessage::HandoffStartAck {
+                from_machine: "macbook-pro".to_owned(),
+                to_machine: "macbook-pro".to_owned(),
+                accepted: true,
+                reason: None,
+            },
+        )
+        .await
+        .expect("send matching-target ack");
+
+        let mut server_cipher = CipherState::new(&[9_u8; 32]);
+        let status = await_handoff_start_ack(
+            &mut server_stream,
+            &mut server_cipher,
+            "macbook-pro",
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("await handoff ack");
+        assert!(matches!(status, HandoffStartAckStatus::Accepted));
     }
 }

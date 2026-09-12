@@ -39,9 +39,13 @@ This writes config, connects to the server, and starts the client automatically.
 
 4. Push into the configured edge on the server machine (sticky edge handoff). You do not need to move beyond the display bounds.
 
-When handoff is active, control is exclusive: input is forwarded to the remote machine instead of being mirrored on both machines.
+Edge crossing switches ownership automatically while the daemon keeps running: the active machine receives input, and the inactive machine does not. Control is exclusive, not mirrored.
 
 Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
+
+Use Ctrl+C only when you want to fully quit hop.
+
+Manual end-to-end validation checklist: [MANUAL_E2E.md](MANUAL_E2E.md)
 
 Default config path:
 - Unix/macOS: `~/.config/hop/config.json` (or `$XDG_CONFIG_HOME/hop/config.json`)
