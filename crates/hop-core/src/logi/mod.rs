@@ -29,7 +29,7 @@ const REQUIRED_SUBSCRIPTIONS: [&str; 4] = [
     "/devices/options/device_removal",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogiDeviceKind {
     Keyboard,
@@ -63,7 +63,9 @@ pub struct LogiHandoff {
     devices: Vec<LogiDevice>,
     hidpp_targets: Vec<hidpp::HidppTarget>,
     peer_host_index: HashMap<String, u8>,
+    peer_device_host_index: HashMap<String, HashMap<String, u8>>,
     local_host_index: Option<u8>,
+    local_device_host_index: HashMap<String, u8>,
     status_note: String,
     options_status: String,
     hidpp_status: String,
@@ -83,7 +85,9 @@ pub struct LogiSummary {
     pub hidpp_status: String,
     pub hidpp_device_count: usize,
     pub local_host_index: Option<u8>,
+    pub local_device_host_index: BTreeMap<String, u8>,
     pub peer_host_index: BTreeMap<String, u8>,
+    pub peer_device_host_index: BTreeMap<String, BTreeMap<String, u8>>,
     pub devices: Vec<LogiDevice>,
     pub status_note: String,
 }
@@ -98,6 +102,8 @@ impl LogiHandoff {
             .map(|peer| peer.machine_name.clone())
             .collect::<Vec<_>>();
         let explicit_map = config.handoff.logi_peer_host_index.clone();
+        let peer_device_host_index = config.handoff.logi_peer_device_host_index.clone();
+        let local_device_host_index = config.handoff.logi_local_device_host_index.clone();
 
         // HID++ ChangeHost is the primary Easy-Switch path; Options+ IPC is best-effort.
         let hidpp = hidpp::discover_change_host_devices();
@@ -129,9 +135,13 @@ impl LogiHandoff {
         if let Some(extra) = mapping_note {
             notes.push(extra);
         }
-        if hidpp.is_ready() && peer_host_index.is_empty() && !peer_names.is_empty() {
+        if hidpp.is_ready()
+            && peer_host_index.is_empty()
+            && peer_device_host_index.is_empty()
+            && !peer_names.is_empty()
+        {
             notes.push(
-                "set handoff.logi_peer_host_index after doctor lists channels (HID++ has no host names)"
+                "set handoff.logi_peer_host_index or logi_peer_device_host_index after doctor lists channels (HID++ has no host names)"
                     .to_owned(),
             );
         }
@@ -144,7 +154,9 @@ impl LogiHandoff {
             devices,
             hidpp_targets: hidpp.targets,
             peer_host_index,
+            peer_device_host_index,
             local_host_index,
+            local_device_host_index,
             status_note,
             options_status,
             hidpp_status,
@@ -169,20 +181,57 @@ impl LogiHandoff {
     }
 
     pub fn can_switch_to_peer(&self, peer_machine: &str) -> bool {
-        let Some(target_index) = self.peer_host_index.get(peer_machine).copied() else {
+        let Some(host_by_kind) = self.peer_host_map_for(peer_machine) else {
             return false;
         };
+        self.can_switch_with_map(&host_by_kind)
+    }
+
+    fn has_any_peer_mapping(&self) -> bool {
+        !self.peer_host_index.is_empty() || !self.peer_device_host_index.is_empty()
+    }
+
+    fn device_kind_key(kind: LogiDeviceKind) -> Option<&'static str> {
+        match kind {
+            LogiDeviceKind::Keyboard => Some("keyboard"),
+            LogiDeviceKind::Mouse => Some("mouse"),
+            LogiDeviceKind::Other => None,
+        }
+    }
+
+    fn peer_host_map_for(&self, peer_machine: &str) -> Option<HashMap<LogiDeviceKind, u8>> {
+        resolve_device_host_map(
+            self.peer_device_host_index.get(peer_machine),
+            self.peer_host_index.get(peer_machine).copied(),
+        )
+    }
+
+    fn local_host_map(&self) -> Option<HashMap<LogiDeviceKind, u8>> {
+        resolve_device_host_map(
+            Some(&self.local_device_host_index).filter(|map| !map.is_empty()),
+            self.local_host_index,
+        )
+    }
+
+    fn can_switch_with_map(&self, host_by_kind: &HashMap<LogiDeviceKind, u8>) -> bool {
+        if host_by_kind.is_empty() {
+            return false;
+        }
         let hidpp_ok = !self.hidpp_targets.is_empty()
-            && self
-                .hidpp_targets
-                .iter()
-                .all(|target| target_index < target.host_count);
+            && self.hidpp_targets.iter().all(|target| {
+                host_by_kind
+                    .get(&target.kind)
+                    .map(|index| *index < target.host_count)
+                    .unwrap_or(false)
+            });
         let options_ok = self.endpoint.is_some()
             && !self.devices.is_empty()
-            && self
-                .devices
-                .iter()
-                .all(|device| device.hosts.iter().any(|host| host.index == target_index));
+            && self.devices.iter().all(|device| {
+                host_by_kind
+                    .get(&device.kind)
+                    .map(|index| device.hosts.iter().any(|host| host.index == *index))
+                    .unwrap_or(false)
+            });
         hidpp_ok || options_ok
     }
 
@@ -191,18 +240,18 @@ impl LogiHandoff {
     }
 
     pub fn switch_to_peer(&self, peer_machine: &str) -> Result<()> {
-        let Some(target_host) = self.peer_host_index.get(peer_machine).copied() else {
+        let Some(host_by_kind) = self.peer_host_map_for(peer_machine) else {
             anyhow::bail!("no host mapping for peer {peer_machine}");
         };
-        self.switch_to_host_index(target_host)
+        self.switch_with_map(&host_by_kind)
             .with_context(|| format!("failed to switch host for peer {peer_machine}"))
     }
 
     pub fn switch_back_local(&self) -> Result<()> {
-        let Some(local_host) = self.local_host_index else {
+        let Some(host_by_kind) = self.local_host_map() else {
             anyhow::bail!("local host slot was not detected");
         };
-        self.switch_to_host_index(local_host)
+        self.switch_with_map(&host_by_kind)
             .context("failed to switch host back to local machine")
     }
 
@@ -210,7 +259,7 @@ impl LogiHandoff {
         let selected_transport = match self.requested_mode {
             HandoffMode::Network => "network".to_owned(),
             HandoffMode::Auto => {
-                if self.logi_path_ready() && !self.peer_host_index.is_empty() {
+                if self.logi_path_ready() && self.has_any_peer_mapping() {
                     if !self.hidpp_targets.is_empty() {
                         "auto(hidpp-first)".to_owned()
                     } else {
@@ -221,7 +270,7 @@ impl LogiHandoff {
                 }
             }
             HandoffMode::Logi => {
-                if self.logi_path_ready() && !self.peer_host_index.is_empty() {
+                if self.logi_path_ready() && self.has_any_peer_mapping() {
                     if !self.hidpp_targets.is_empty() {
                         "logi(hidpp)".to_owned()
                     } else {
@@ -246,10 +295,28 @@ impl LogiHandoff {
             hidpp_status: self.hidpp_status.clone(),
             hidpp_device_count: self.hidpp_targets.len(),
             local_host_index: self.local_host_index,
+            local_device_host_index: self
+                .local_device_host_index
+                .iter()
+                .map(|(kind, index)| (kind.clone(), *index))
+                .collect(),
             peer_host_index: self
                 .peer_host_index
                 .iter()
                 .map(|(peer, index)| (peer.clone(), *index))
+                .collect(),
+            peer_device_host_index: self
+                .peer_device_host_index
+                .iter()
+                .map(|(peer, devices)| {
+                    (
+                        peer.clone(),
+                        devices
+                            .iter()
+                            .map(|(kind, index)| (kind.clone(), *index))
+                            .collect(),
+                    )
+                })
                 .collect(),
             devices: self.devices.clone(),
             status_note: self.status_note.clone(),
@@ -318,14 +385,53 @@ impl LogiHandoff {
                 .collect::<Vec<_>>();
             lines.push(format!("peer->channel map: {}", pairs.join(", ")));
         }
+        if summary.peer_device_host_index.is_empty() {
+            lines.push("peer->device channel map: none".to_owned());
+        } else {
+            let peers = summary
+                .peer_device_host_index
+                .iter()
+                .map(|(peer, devices)| {
+                    let pairs = devices
+                        .iter()
+                        .map(|(kind, host)| format!("{kind}:{}", host + 1))
+                        .collect::<Vec<_>>();
+                    format!("{peer} {{{}}}", pairs.join(", "))
+                })
+                .collect::<Vec<_>>();
+            lines.push(format!("peer->device channel map: {}", peers.join("; ")));
+        }
+        if summary.local_device_host_index.is_empty() {
+            if let Some(local) = summary.local_host_index {
+                lines.push(format!("local channel: {}", local + 1));
+            } else {
+                lines.push("local channel: unknown".to_owned());
+            }
+        } else {
+            let pairs = summary
+                .local_device_host_index
+                .iter()
+                .map(|(kind, host)| format!("{kind}:{}", host + 1))
+                .collect::<Vec<_>>();
+            lines.push(format!("local device channel map: {}", pairs.join(", ")));
+        }
         lines.push(format!("logi status: {}", summary.status_note));
         lines
     }
 
-    fn switch_to_host_index(&self, host_index: u8) -> Result<()> {
+    fn switch_with_map(&self, host_by_kind: &HashMap<LogiDeviceKind, u8>) -> Result<()> {
+        if host_by_kind.is_empty() {
+            anyhow::bail!("empty device host map");
+        }
         if !self.hidpp_targets.is_empty() {
-            return hidpp::switch_targets_to_host(&self.hidpp_targets, host_index)
-                .with_context(|| format!("hid++ switch to channel {}", host_index + 1));
+            let channels = host_by_kind
+                .iter()
+                .filter_map(|(kind, index)| {
+                    Self::device_kind_key(*kind).map(|key| format!("{key}:{}", index + 1))
+                })
+                .collect::<Vec<_>>();
+            return hidpp::switch_targets_with_map(&self.hidpp_targets, host_by_kind)
+                .with_context(|| format!("hid++ switch to channels {}", channels.join(", ")));
         }
 
         let Some(endpoint) = self.endpoint.as_ref() else {
@@ -345,6 +451,12 @@ impl LogiHandoff {
         }
 
         for (index, device) in devices.iter().enumerate() {
+            let Some(&host_index) = host_by_kind.get(&device.kind) else {
+                anyhow::bail!(
+                    "no host mapping for device kind {}",
+                    kind_label(device.kind)
+                );
+            };
             if !device.hosts.iter().any(|slot| slot.index == host_index) {
                 anyhow::bail!(
                     "device {} does not have host slot {}",
@@ -397,6 +509,32 @@ fn kind_label(kind: LogiDeviceKind) -> &'static str {
         LogiDeviceKind::Mouse => "mouse",
         LogiDeviceKind::Other => "other",
     }
+}
+
+fn resolve_device_host_map(
+    device_map: Option<&HashMap<String, u8>>,
+    uniform: Option<u8>,
+) -> Option<HashMap<LogiDeviceKind, u8>> {
+    let mut out = HashMap::new();
+    if let Some(device_map) = device_map {
+        for (kind, key) in [
+            (LogiDeviceKind::Keyboard, "keyboard"),
+            (LogiDeviceKind::Mouse, "mouse"),
+        ] {
+            if let Some(&index) = device_map.get(key) {
+                out.insert(kind, index);
+            }
+        }
+    }
+    if out.is_empty() {
+        let index = uniform?;
+        out.insert(LogiDeviceKind::Keyboard, index);
+        out.insert(LogiDeviceKind::Mouse, index);
+    } else if let Some(index) = uniform {
+        out.entry(LogiDeviceKind::Keyboard).or_insert(index);
+        out.entry(LogiDeviceKind::Mouse).or_insert(index);
+    }
+    Some(out)
 }
 
 fn build_peer_host_map(
@@ -489,11 +627,13 @@ fn best_host_for_machine(
         if used_indexes.contains(&host.index) {
             continue;
         }
-        let mut score = score_host_name_match(host, machine_name);
+        // Never auto-map a peer onto the currently connected local host slot.
         if Some(host.index) == local_host {
-            score -= 90;
+            continue;
         }
+        let mut score = score_host_name_match(host, machine_name);
         if host.connected {
+            // Connected-but-not-local is rare; still prefer named matches above it.
             score += 5;
         }
         match best {
@@ -1363,7 +1503,9 @@ mod tests {
                 map.insert("macbook-pro".to_owned(), 1);
                 map
             },
+            peer_device_host_index: HashMap::new(),
             local_host_index: Some(0),
+            local_device_host_index: HashMap::new(),
             status_note: "hid++ ready".to_owned(),
             options_status: "options+ ipc unavailable".to_owned(),
             hidpp_status: "hid++ ready".to_owned(),
@@ -1373,5 +1515,118 @@ mod tests {
             HandoffTransport::Logi
         );
         assert!(!handoff.can_switch_to_peer("missing-peer"));
+    }
+
+    #[test]
+    fn resolve_device_host_map_prefers_per_device_entries() {
+        let mut device_map = HashMap::new();
+        device_map.insert("keyboard".to_owned(), 1);
+        device_map.insert("mouse".to_owned(), 2);
+        let resolved = resolve_device_host_map(Some(&device_map), Some(0)).expect("map");
+        assert_eq!(resolved.get(&LogiDeviceKind::Keyboard), Some(&1));
+        assert_eq!(resolved.get(&LogiDeviceKind::Mouse), Some(&2));
+    }
+
+    #[test]
+    fn resolve_device_host_map_falls_back_to_uniform() {
+        let resolved = resolve_device_host_map(None, Some(3)).expect("map");
+        assert_eq!(resolved.get(&LogiDeviceKind::Keyboard), Some(&3));
+        assert_eq!(resolved.get(&LogiDeviceKind::Mouse), Some(&3));
+    }
+
+    #[test]
+    fn resolve_device_host_map_fills_missing_kind_from_uniform() {
+        let mut device_map = HashMap::new();
+        device_map.insert("keyboard".to_owned(), 1);
+        let resolved = resolve_device_host_map(Some(&device_map), Some(0)).expect("map");
+        assert_eq!(resolved.get(&LogiDeviceKind::Keyboard), Some(&1));
+        assert_eq!(resolved.get(&LogiDeviceKind::Mouse), Some(&0));
+    }
+
+    #[test]
+    fn peer_device_map_enables_switch_without_uniform_peer_index() {
+        let handoff = LogiHandoff {
+            requested_mode: HandoffMode::Auto,
+            local_machine_name: "windows-desktop".to_owned(),
+            endpoint: None,
+            devices: Vec::new(),
+            hidpp_targets: vec![
+                hidpp::HidppTarget {
+                    path: b"/dev/hidraw0".to_vec(),
+                    name: "Casa Keys".to_owned(),
+                    kind: LogiDeviceKind::Keyboard,
+                    product_id: 0x1111,
+                    device_index: 0xFF,
+                    report_id: hidpp::REPORT_SHORT,
+                    feature_index: 0x0D,
+                    host_count: 3,
+                    current_host: 1,
+                },
+                hidpp::HidppTarget {
+                    path: b"/dev/hidraw1".to_vec(),
+                    name: "MX Mouse".to_owned(),
+                    kind: LogiDeviceKind::Mouse,
+                    product_id: 0x2222,
+                    device_index: 0xFF,
+                    report_id: hidpp::REPORT_SHORT,
+                    feature_index: 0x0D,
+                    host_count: 3,
+                    current_host: 2,
+                },
+            ],
+            peer_host_index: HashMap::new(),
+            peer_device_host_index: {
+                let mut peer = HashMap::new();
+                let mut devices = HashMap::new();
+                devices.insert("keyboard".to_owned(), 0);
+                devices.insert("mouse".to_owned(), 0);
+                peer.insert("hop-machine".to_owned(), devices);
+                peer
+            },
+            local_host_index: None,
+            local_device_host_index: {
+                let mut map = HashMap::new();
+                map.insert("keyboard".to_owned(), 1);
+                map.insert("mouse".to_owned(), 2);
+                map
+            },
+            status_note: "hid++ ready".to_owned(),
+            options_status: "options+ ipc unavailable".to_owned(),
+            hidpp_status: "hid++ ready".to_owned(),
+        };
+        assert!(handoff.can_switch_to_peer("hop-machine"));
+        assert_eq!(
+            handoff.preferred_transport_for_peer("hop-machine"),
+            HandoffTransport::Logi
+        );
+        let local = handoff.local_host_map().expect("local map");
+        assert_eq!(local.get(&LogiDeviceKind::Keyboard), Some(&1));
+        assert_eq!(local.get(&LogiDeviceKind::Mouse), Some(&2));
+    }
+
+    #[test]
+    fn best_host_never_auto_maps_to_connected_local_host() {
+        let hosts = vec![
+            LogiHostSlot {
+                index: 0,
+                paired: true,
+                connected: true,
+                os: Some("WINDOWS".to_owned()),
+                name: Some("NUCBOX_M7PRO".to_owned()),
+            },
+            LogiHostSlot {
+                index: 1,
+                paired: true,
+                connected: false,
+                os: Some("MACOS".to_owned()),
+                name: Some("hop-machine".to_owned()),
+            },
+        ];
+        let used = HashSet::new();
+        let chosen = best_host_for_machine(&hosts, "hop-machine", &used, Some(0));
+        assert_eq!(chosen, Some(1));
+        // Even with a weak name match, local connected slot must stay unused.
+        let chosen_bad_name = best_host_for_machine(&hosts, "unknown-peer", &used, Some(0));
+        assert_eq!(chosen_bad_name, Some(1));
     }
 }

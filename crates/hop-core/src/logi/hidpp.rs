@@ -105,14 +105,28 @@ pub fn discover_change_host_devices() -> HidppDiscovery {
     }
 }
 
+#[allow(dead_code)]
 pub fn switch_targets_to_host(targets: &[HidppTarget], host_index: u8) -> Result<()> {
+    let map = targets
+        .iter()
+        .map(|target| (target.kind, host_index))
+        .collect::<std::collections::HashMap<_, _>>();
+    switch_targets_with_map(targets, &map)
+}
+
+/// Switch each HID++ target to a host index selected by device kind.
+/// Targets whose kind is missing from `host_by_kind` are skipped.
+pub fn switch_targets_with_map(
+    targets: &[HidppTarget],
+    host_by_kind: &std::collections::HashMap<LogiDeviceKind, u8>,
+) -> Result<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        switch_targets_to_host_native(targets, host_index)
+        switch_targets_with_map_native(targets, host_by_kind)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (targets, host_index);
+        let _ = (targets, host_by_kind);
         bail!("hid++ ChangeHost is only implemented on macOS and Windows");
     }
 }
@@ -197,7 +211,10 @@ fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn switch_targets_to_host_native(targets: &[HidppTarget], host_index: u8) -> Result<()> {
+fn switch_targets_with_map_native(
+    targets: &[HidppTarget],
+    host_by_kind: &std::collections::HashMap<LogiDeviceKind, u8>,
+) -> Result<()> {
     use hidapi::HidApi;
 
     if targets.is_empty() {
@@ -206,7 +223,12 @@ fn switch_targets_to_host_native(targets: &[HidppTarget], host_index: u8) -> Res
     let api = HidApi::new().context("failed to init hidapi for switch")?;
     let mut errors = Vec::new();
     let mut switched = 0_usize;
+    let mut attempted = 0_usize;
     for target in targets {
+        let Some(&host_index) = host_by_kind.get(&target.kind) else {
+            continue;
+        };
+        attempted += 1;
         if host_index >= target.host_count {
             errors.push(format!(
                 "{} has only {} host slot(s); cannot use index {}",
@@ -237,6 +259,9 @@ fn switch_targets_to_host_native(targets: &[HidppTarget], host_index: u8) -> Res
             }
             Err(error) => errors.push(format!("{}: open failed: {error}", target.name)),
         }
+    }
+    if attempted == 0 {
+        bail!("no hid++ targets matched the requested device-kind host map");
     }
     if switched == 0 {
         bail!("hid++ switch failed for all targets: {}", errors.join("; "));
