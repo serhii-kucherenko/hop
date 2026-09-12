@@ -45,6 +45,24 @@ fn control_message_roundtrip_through_cipher() {
 }
 
 #[test]
+fn handoff_ack_roundtrip_through_cipher() {
+    let key = [8_u8; 32];
+    let mut sender = CipherState::new(&key);
+    let mut receiver = CipherState::new(&key);
+    let message = ControlMessage::HandoffStartAck {
+        from_machine: "macbook-pro".to_owned(),
+        to_machine: "win11".to_owned(),
+        accepted: true,
+        reason: None,
+    };
+
+    let packet = encode_control(&mut sender, &message).expect("encode control");
+    let decoded = decode_control(&mut receiver, &packet).expect("decode control");
+
+    assert_eq!(decoded, message);
+}
+
+#[test]
 fn datagram_roundtrip_through_cipher() {
     let key = [2_u8; 32];
     let mut sender = CipherState::new(&key);
