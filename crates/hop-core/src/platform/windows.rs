@@ -31,8 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::keycodes::{windows_vk_to_wire, wire_to_windows_vk};
 use crate::platform::{
-    CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
-    ScreenInfoProvider,
+    mouse_move_event_from_points, CursorController, LocalInputCapture, PermissionStatus,
+    PlatformAdapters, RemoteInputInjector, ScreenInfoProvider,
 };
 
 const MAX_QUEUED_EVENTS: usize = 2_048;
@@ -107,22 +107,30 @@ impl WindowsCaptureState {
         self.remote_focus_active.load(Ordering::SeqCst)
     }
 
-    fn record_mouse_move(&self, point: POINT) -> Option<InputEvent> {
+    fn record_local_mouse_move(&self, point: POINT) -> Option<InputEvent> {
         let mut last_point = self.last_mouse_point.lock().ok()?;
-        let event = (*last_point).map(|(last_x, last_y)| InputEvent::MouseMove {
-            dx: saturating_i32_to_i16(point.x - last_x),
-            dy: saturating_i32_to_i16(point.y - last_y),
+        let event = (*last_point).and_then(|(last_x, last_y)| {
+            mouse_move_event_from_points(
+                CursorPosition {
+                    x: last_x,
+                    y: last_y,
+                },
+                point_to_cursor(point),
+            )
         });
         *last_point = Some((point.x, point.y));
-        event.filter(|movement| {
-            matches!(
-                movement,
-                InputEvent::MouseMove {
-                    dx: non_zero_dx,
-                    dy: non_zero_dy
-                } if *non_zero_dx != 0 || *non_zero_dy != 0
-            )
-        })
+        event
+    }
+
+    fn record_remote_mouse_move(
+        &self,
+        would_be_point: POINT,
+        actual_point: POINT,
+    ) -> Option<InputEvent> {
+        mouse_move_event_from_points(
+            point_to_cursor(actual_point),
+            point_to_cursor(would_be_point),
+        )
     }
 }
 
@@ -389,9 +397,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         if let Some(state) = CAPTURE_STATE.get() {
             let hook = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
             if (hook.flags & LLMHF_INJECTED) == 0 {
-                should_block = state.remote_focus_active();
+                let remote_focus_active = state.remote_focus_active();
+                should_block = remote_focus_active;
                 let message = wparam.0 as u32;
-                if let Some(event) = mouse_event_from_hook(state, message, hook) {
+                if let Some(event) =
+                    mouse_event_from_hook(state, message, hook, remote_focus_active)
+                {
                     state.push_event(event);
                 }
             }
@@ -408,9 +419,19 @@ fn mouse_event_from_hook(
     state: &WindowsCaptureState,
     message: u32,
     hook: &MSLLHOOKSTRUCT,
+    remote_focus_active: bool,
 ) -> Option<InputEvent> {
     match message {
-        WM_MOUSEMOVE => state.record_mouse_move(hook.pt),
+        WM_MOUSEMOVE => {
+            if remote_focus_active {
+                let mut actual = POINT::default();
+                if unsafe { GetCursorPos(&mut actual) }.is_ok() {
+                    return state.record_remote_mouse_move(hook.pt, actual);
+                }
+                return None;
+            }
+            state.record_local_mouse_move(hook.pt)
+        }
         WM_LBUTTONDOWN => Some(InputEvent::MouseButton {
             button: MouseButton::Left,
             pressed: true,
@@ -552,6 +573,13 @@ fn normalize_wheel_delta(raw_delta: i16) -> i16 {
         return saturating_i32_to_i16(raw_delta / WHEEL_DELTA);
     }
     saturating_i32_to_i16(raw_delta.signum())
+}
+
+fn point_to_cursor(point: POINT) -> CursorPosition {
+    CursorPosition {
+        x: point.x,
+        y: point.y,
+    }
 }
 
 fn saturating_i32_to_i16(value: i32) -> i16 {

@@ -62,3 +62,9 @@ I. Restart and reconnect:
 J. Sticky threshold safety:
 - Brush the active edge lightly without sustained outbound push.
 - Expected: no accidental handoff.
+
+K. Cursor feel and stability (Windows server → macOS client):
+- On Windows server, set a non-default pointer speed and toggle "Enhance pointer precision".
+- Enter remote mode and move in medium-speed circles and short flicks.
+- Expected: cursor feel on macOS changes with the Windows pointer settings.
+- Expected: no visible cursor shake/jitter during moderate-speed movement.
