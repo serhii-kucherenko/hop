@@ -2,23 +2,30 @@
 //!
 //! Priority path for Easy-Switch when Options+ IPC is unavailable.
 //! Windows is first-class; macOS is best-effort (may need Input Monitoring).
+//! Linux builds stub discovery (no hidapi) so CI stays dependency-light.
 
-use std::time::{Duration, Instant};
-
-use anyhow::{bail, Context, Result};
-use hidapi::{HidApi, HidDevice};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use anyhow::Context;
+use anyhow::{bail, Result};
 
 use super::{LogiDevice, LogiDeviceKind, LogiHostSlot};
 
+#[allow(dead_code)]
 pub const LOGITECH_VID: u16 = 0x046D;
+#[allow(dead_code)]
 const SW_ID: u8 = 0x0A;
+#[allow(dead_code)]
 const ROOT_FEATURE: u8 = 0x00;
+#[allow(dead_code)]
 pub const FEAT_CHANGE_HOST: u16 = 0x1814;
 pub const REPORT_SHORT: u8 = 0x10;
 pub const REPORT_LONG: u8 = 0x11;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const DEVICE_INDICES: [u8; 7] = [0xFF, 1, 2, 3, 4, 5, 6];
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HidppTarget {
     pub path: Vec<u8>,
     pub name: String,
@@ -68,27 +75,52 @@ impl HidppDiscovery {
 }
 
 pub fn discover_change_host_devices() -> HidppDiscovery {
-    match discover_inner() {
-        Ok(targets) if !targets.is_empty() => HidppDiscovery {
-            status_note: format!(
-                "hid++ ChangeHost ready ({} device{})",
-                targets.len(),
-                if targets.len() == 1 { "" } else { "s" }
-            ),
-            targets,
-        },
-        Ok(_) => HidppDiscovery {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        match discover_inner() {
+            Ok(targets) if !targets.is_empty() => HidppDiscovery {
+                status_note: format!(
+                    "hid++ ChangeHost ready ({} device{})",
+                    targets.len(),
+                    if targets.len() == 1 { "" } else { "s" }
+                ),
+                targets,
+            },
+            Ok(_) => HidppDiscovery {
+                targets: Vec::new(),
+                status_note: "hid++: no Logitech device with feature 0x1814 found".to_owned(),
+            },
+            Err(error) => HidppDiscovery {
+                targets: Vec::new(),
+                status_note: format!("hid++ discovery failed: {error}"),
+            },
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        HidppDiscovery {
             targets: Vec::new(),
-            status_note: "hid++: no Logitech device with feature 0x1814 found".to_owned(),
-        },
-        Err(error) => HidppDiscovery {
-            targets: Vec::new(),
-            status_note: format!("hid++ discovery failed: {error}"),
-        },
+            status_note: "hid++: unsupported on this OS build (macOS/Windows only)".to_owned(),
+        }
     }
 }
 
+pub fn switch_targets_to_host(targets: &[HidppTarget], host_index: u8) -> Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        switch_targets_to_host_native(targets, host_index)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (targets, host_index);
+        bail!("hid++ ChangeHost is only implemented on macOS and Windows");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn discover_inner() -> Result<Vec<HidppTarget>> {
+    use hidapi::HidApi;
+
     let api = HidApi::new().context("failed to init hidapi")?;
     let mut candidates = api
         .device_list()
@@ -135,12 +167,11 @@ fn discover_inner() -> Result<Vec<HidppTarget>> {
         drop(device);
     }
 
-    // Prefer keeping both mouse+keyboard; if multiple of same kind, keep best ranked.
     Ok(dedupe_by_kind(found))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
-    // Keep first mouse and first keyboard (already ranked), plus others if unique paths.
     let mut mouse = None;
     let mut keyboard = None;
     let mut others = Vec::new();
@@ -159,14 +190,16 @@ fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
     if let Some(keyboard) = keyboard {
         out.push(keyboard);
     }
-    // Only keep "other" if we found nothing else (receiver-bound oddities).
     if out.is_empty() {
         out.extend(others);
     }
     out
 }
 
-pub fn switch_targets_to_host(targets: &[HidppTarget], host_index: u8) -> Result<()> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn switch_targets_to_host_native(targets: &[HidppTarget], host_index: u8) -> Result<()> {
+    use hidapi::HidApi;
+
     if targets.is_empty() {
         bail!("no hid++ ChangeHost targets available");
     }
@@ -211,7 +244,8 @@ pub fn switch_targets_to_host(targets: &[HidppTarget], host_index: u8) -> Result
     Ok(())
 }
 
-fn probe_change_host(device: &HidDevice) -> Option<(u8, u8, u8)> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn probe_change_host(device: &hidapi::HidDevice) -> Option<(u8, u8, u8)> {
     let params = get_feature_params(FEAT_CHANGE_HOST);
     for &dev_idx in &DEVICE_INDICES {
         for &report_id in &[REPORT_LONG, REPORT_SHORT] {
@@ -227,8 +261,9 @@ fn probe_change_host(device: &HidDevice) -> Option<(u8, u8, u8)> {
     None
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn read_host_info(
-    device: &HidDevice,
+    device: &hidapi::HidDevice,
     report_id: u8,
     device_index: u8,
     feature_index: u8,
@@ -240,14 +275,14 @@ fn read_host_info(
     ))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn set_current_host(
-    device: &HidDevice,
+    device: &hidapi::HidDevice,
     report_id: u8,
     device_index: u8,
     feature_index: u8,
     host_index: u8,
 ) -> Result<()> {
-    // Function 1 = setCurrentHost. Successful calls do not reply (link drops).
     let frame = build_set_current_host_frame(report_id, device_index, feature_index, host_index);
     device
         .write(&frame)
@@ -255,8 +290,9 @@ fn set_current_host(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn hidpp_request(
-    device: &HidDevice,
+    device: &hidapi::HidDevice,
     report_id: u8,
     device_index: u8,
     feature_index: u8,
@@ -264,6 +300,8 @@ fn hidpp_request(
     params: &[u8],
     timeout_ms: u64,
 ) -> Option<Vec<u8>> {
+    use std::time::{Duration, Instant};
+
     let frame = build_request_frame(report_id, device_index, feature_index, function, params);
     if device.write(&frame).is_err() {
         return None;
@@ -293,6 +331,7 @@ fn hidpp_request(
     None
 }
 
+#[allow(dead_code)]
 pub fn frame_len(report_id: u8) -> usize {
     match report_id {
         REPORT_SHORT => 7,
@@ -301,10 +340,12 @@ pub fn frame_len(report_id: u8) -> usize {
     }
 }
 
+#[allow(dead_code)]
 pub fn get_feature_params(feature_id: u16) -> [u8; 3] {
     [(feature_id >> 8) as u8, (feature_id & 0xFF) as u8, 0x00]
 }
 
+#[allow(dead_code)]
 pub fn build_request_frame(
     report_id: u8,
     device_index: u8,
@@ -323,6 +364,7 @@ pub fn build_request_frame(
     frame
 }
 
+#[allow(dead_code)]
 pub fn build_set_current_host_frame(
     report_id: u8,
     device_index: u8,
@@ -332,6 +374,7 @@ pub fn build_set_current_host_frame(
     build_request_frame(report_id, device_index, feature_index, 1, &[host_index])
 }
 
+#[allow(dead_code)]
 pub fn parse_get_feature_index(reply: &[u8]) -> Option<u8> {
     if reply.len() < 5 {
         return None;
@@ -344,6 +387,7 @@ pub fn parse_get_feature_index(reply: &[u8]) -> Option<u8> {
     }
 }
 
+#[allow(dead_code)]
 pub fn device_rank(usage_page: u16, usage: u16, name: &str) -> u8 {
     let lower = name.to_ascii_lowercase();
     let mouse = (usage_page == 0x0001 && usage == 0x0002)
@@ -363,6 +407,7 @@ pub fn device_rank(usage_page: u16, usage: u16, name: &str) -> u8 {
     tier * 10 + non_vendor
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn infer_kind(usage_page: u16, usage: u16, name: &str) -> LogiDeviceKind {
     let lower = name.to_ascii_lowercase();
     if (usage_page == 0x0001 && usage == 0x0002)
