@@ -94,11 +94,13 @@ async fn run_server(config: Config, stop_signal_path: Option<&Path>) -> anyhow::
             &config,
             &mut adapters,
             &mut clipboard_sync,
-            local_screen,
             &udp_socket,
             stream,
             addr,
-            stop_signal_path,
+            ServerSessionParams {
+                local_screen,
+                stop_signal_path,
+            },
         )
         .await
         {
@@ -414,12 +416,13 @@ async fn run_server_session(
     config: &Config,
     adapters: &mut crate::platform::PlatformAdapters,
     clipboard_sync: &mut ClipboardSync,
-    local_screen: ScreenBounds,
     udp_socket: &UdpSocket,
     mut stream: TcpStream,
     addr: SocketAddr,
-    stop_signal_path: Option<&Path>,
+    session_params: ServerSessionParams<'_>,
 ) -> anyhow::Result<ServerSessionControl> {
+    let local_screen = session_params.local_screen;
+    let stop_signal_path = session_params.stop_signal_path;
     let (hello, mut cipher) =
         complete_server_auth(&mut stream, config.local.shared_secret.as_bytes()).await?;
     println!("authenticated peer machine {}", hello.machine_name);
@@ -723,6 +726,11 @@ async fn run_server_session(
 
 enum ServerSessionControl {
     StopRequested,
+}
+
+struct ServerSessionParams<'a> {
+    local_screen: ScreenBounds,
+    stop_signal_path: Option<&'a Path>,
 }
 
 enum HandoffStartAckStatus {
