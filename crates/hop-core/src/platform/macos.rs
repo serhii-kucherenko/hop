@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -168,16 +168,25 @@ impl MouseButtonsDown {
 
 struct MacosInputInjector {
     buttons_down: MouseButtonsDown,
+    virtual_cursor: Option<CGPoint>,
+    backing_scale_x: f64,
+    backing_scale_y: f64,
+    last_move_at: Option<Instant>,
 }
 
 impl MacosInputInjector {
     fn new() -> Self {
+        let (backing_scale_x, backing_scale_y) = display_backing_scale();
         Self {
             buttons_down: MouseButtonsDown {
                 left: false,
                 right: false,
                 middle: false,
             },
+            virtual_cursor: None,
+            backing_scale_x,
+            backing_scale_y,
+            last_move_at: None,
         }
     }
 
@@ -207,13 +216,45 @@ impl MacosInputInjector {
         event_type: CGEventType,
         button: CGMouseButton,
         point: CGPoint,
+        delta: Option<(i64, i64)>,
     ) -> Result<()> {
         let source =
             create_event_source().ok_or_else(|| anyhow!("failed to create CGEventSource"))?;
-        let event = CGEvent::new_mouse_event(source, event_type, point, button)
+        let mut event = CGEvent::new_mouse_event(source, event_type, point, button)
             .map_err(|_| anyhow!("failed to build macOS mouse event"))?;
+        if let Some((delta_x, delta_y)) = delta {
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, delta_x);
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, delta_y);
+        }
         event.post(CGEventTapLocation::HID);
         Ok(())
+    }
+
+    fn maybe_resync_virtual_cursor(&mut self, now: Instant) -> Result<()> {
+        let should_resync = match self.last_move_at {
+            Some(last) => now.duration_since(last) > Duration::from_millis(40),
+            None => true,
+        };
+        if should_resync {
+            self.virtual_cursor = Some(self.current_cursor_location()?);
+        }
+        Ok(())
+    }
+
+    fn scaled_mouse_delta(&self, dx: i16, dy: i16) -> (f64, f64) {
+        (
+            f64::from(dx) / self.backing_scale_x,
+            f64::from(dy) / self.backing_scale_y,
+        )
+    }
+
+    fn virtual_cursor_or_system(&mut self) -> Result<CGPoint> {
+        if let Some(cursor) = self.virtual_cursor {
+            return Ok(cursor);
+        }
+        let current = self.current_cursor_location()?;
+        self.virtual_cursor = Some(current);
+        Ok(current)
     }
 }
 
@@ -224,13 +265,23 @@ impl RemoteInputInjector for MacosInputInjector {
                 if *dx == 0 && *dy == 0 {
                     return Ok(());
                 }
-                let current = self.current_cursor_location()?;
-                let target = CGPoint::new(current.x + f64::from(*dx), current.y + f64::from(*dy));
+                let now = Instant::now();
+                self.maybe_resync_virtual_cursor(now)?;
+                let current = self.virtual_cursor_or_system()?;
+                let (scaled_dx, scaled_dy) = self.scaled_mouse_delta(*dx, *dy);
+                let target = CGPoint::new(current.x + scaled_dx, current.y + scaled_dy);
+                self.virtual_cursor = Some(target);
                 let (event_type, button) = self.movement_event_type();
-                self.post_mouse_event(event_type, button, target)?;
+                self.post_mouse_event(
+                    event_type,
+                    button,
+                    target,
+                    Some((scaled_dx.round() as i64, scaled_dy.round() as i64)),
+                )?;
+                self.last_move_at = Some(now);
             }
             InputEvent::MouseButton { button, pressed } => {
-                let current = self.current_cursor_location()?;
+                let current = self.virtual_cursor_or_system()?;
                 let (event_type, native_button) = match (button, pressed) {
                     (MouseButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left),
                     (MouseButton::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
@@ -247,7 +298,7 @@ impl RemoteInputInjector for MacosInputInjector {
                         (CGEventType::OtherMouseUp, CGMouseButton::Center)
                     }
                 };
-                self.post_mouse_event(event_type, native_button, current)?;
+                self.post_mouse_event(event_type, native_button, current, None)?;
                 self.buttons_down.update(*button, *pressed);
             }
             InputEvent::Key { scancode, pressed } => {
@@ -367,6 +418,16 @@ fn query_cursor_position() -> Result<CursorPosition> {
     let event =
         CGEvent::new(source).map_err(|_| anyhow!("failed to query macOS cursor location"))?;
     Ok(point_to_cursor(event.location()))
+}
+
+fn display_backing_scale() -> (f64, f64) {
+    let display = CGDisplay::main();
+    let bounds = display.bounds();
+    let width = bounds.size.width.max(1.0);
+    let height = bounds.size.height.max(1.0);
+    let scale_x = display.pixels_wide() as f64 / width;
+    let scale_y = display.pixels_high() as f64 / height;
+    (scale_x.max(1.0), scale_y.max(1.0))
 }
 
 fn start_event_tap(state: Arc<MacosCaptureState>) -> Result<()> {
