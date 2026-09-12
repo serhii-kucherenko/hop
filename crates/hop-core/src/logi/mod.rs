@@ -430,9 +430,8 @@ impl LogiHandoff {
                     Self::device_kind_key(*kind).map(|key| format!("{key}:{}", index + 1))
                 })
                 .collect::<Vec<_>>();
-            return hidpp::switch_targets_with_map(&self.hidpp_targets, host_by_kind).with_context(
-                || format!("hid++ switch to channels {}", channels.join(", ")),
-            );
+            return hidpp::switch_targets_with_map(&self.hidpp_targets, host_by_kind)
+                .with_context(|| format!("hid++ switch to channels {}", channels.join(", ")));
         }
 
         let Some(endpoint) = self.endpoint.as_ref() else {
