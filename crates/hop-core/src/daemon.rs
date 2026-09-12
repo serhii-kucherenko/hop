@@ -151,8 +151,13 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         let pending_events = adapters.input_capture.poll_input_events()?;
 
         if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
-            let action = handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
-            if let HandoffAction::Begin { target_machine, edge } = action {
+            let action =
+                handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
+            if let HandoffAction::Begin {
+                target_machine,
+                edge,
+            } = action
+            {
                 activate_remote_focus(&mut adapters, edge, local_screen)?;
                 let message = ControlMessage::HandoffStart {
                     from_machine: config.local.machine_name.clone(),
