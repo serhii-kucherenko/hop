@@ -51,12 +51,8 @@ fn handoff_begins_when_crossing_edge_with_neighbor() {
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
 
-    let action = controller.on_local_cursor(
-        CursorPosition { x: 1921, y: 400 },
-        screen,
-        &layout,
-        &[],
-    );
+    let action =
+        controller.on_local_cursor(CursorPosition { x: 1921, y: 400 }, screen, &layout, &[]);
     assert_eq!(
         action,
         HandoffAction::Begin {
@@ -81,12 +77,7 @@ fn handoff_release_returns_focus_locally() {
     };
     let layout = two_machine_layout();
     let mut controller = HandoffController::new("macbook-pro");
-    let _ = controller.on_local_cursor(
-        CursorPosition { x: 1925, y: 540 },
-        screen,
-        &layout,
-        &[],
-    );
+    let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
 
     let release = controller.on_remote_release();
     assert_eq!(
@@ -109,12 +100,8 @@ fn no_handoff_when_crossing_without_neighbor() {
         height: 1080,
     };
     let mut controller = HandoffController::new("macbook-pro");
-    let action = controller.on_local_cursor(
-        CursorPosition { x: 1921, y: 20 },
-        screen,
-        &layout,
-        &[],
-    );
+    let action =
+        controller.on_local_cursor(CursorPosition { x: 1921, y: 20 }, screen, &layout, &[]);
     assert_eq!(action, HandoffAction::None);
     assert_eq!(controller.focus_state(), &FocusState::Local);
 }

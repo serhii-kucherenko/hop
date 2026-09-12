@@ -170,7 +170,7 @@ impl StickyEdgeState {
     fn new(edge: Edge) -> Self {
         Self {
             edge,
-            dwell_samples: 1,
+            dwell_samples: 0,
             outbound_samples: 0,
             outbound_distance: 0,
         }

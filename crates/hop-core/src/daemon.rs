@@ -101,7 +101,8 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         let pending_events = adapters.input_capture.poll_input_events()?;
 
         if let Some(cursor) = adapters.input_capture.poll_cursor_position()? {
-            let action = handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
+            let action =
+                handoff.on_local_cursor(cursor, local_screen, &dynamic_layout, &pending_events);
             if let HandoffAction::Begin {
                 target_machine,
                 edge,
