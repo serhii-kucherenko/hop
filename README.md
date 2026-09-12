@@ -39,6 +39,8 @@ This writes config, connects to the server, and starts the client automatically.
 
 4. Flick across the configured edge on the server machine.
 
+Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; moving left from the Mac returns control. Override with `hop pair --position <left|right|above|below>` if needed.
+
 Default config path:
 - Unix/macOS: `~/.config/hop/config.json` (or `$XDG_CONFIG_HOME/hop/config.json`)
 - Windows: `%APPDATA%\hop\config.json`

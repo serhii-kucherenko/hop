@@ -426,7 +426,7 @@ fn install_and_run_event_tap(
     let loop_source = tap
         .mach_port
         .create_runloop_source(0)
-        .ok_or_else(|| anyhow!("failed to create CFRunLoop source for event tap"))?;
+        .map_err(|_| anyhow!("failed to create CFRunLoop source for event tap"))?;
     run_loop.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
 
