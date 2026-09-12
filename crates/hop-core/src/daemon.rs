@@ -187,7 +187,11 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     .await?;
     println!("control connection established and authenticated");
 
-    let server_hello = recv_control_message(&mut stream, &mut cipher).await?;
+    let server_hello = loop {
+        if let Some(message) = recv_control_message(&mut stream, &mut cipher).await? {
+            break message;
+        }
+    };
     println!("server info: {server_hello:?}");
     let udp_socket = UdpSocket::bind(&config.local.data_bind)
         .await
@@ -205,7 +209,9 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             result = recv_control_message(&mut stream, &mut cipher) => {
-                let message = result?;
+                let Some(message) = result? else {
+                    continue;
+                };
                 match message {
                     ControlMessage::HandoffStart {
                         from_machine,
@@ -238,12 +244,17 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
                     continue;
                 }
                 let payload = &datagram_buffer[..len];
-                if let Ok(message) = decode_datagram(&mut cipher, payload) {
-                    if !handoff_active {
-                        continue;
+                match decode_datagram(&mut cipher, payload) {
+                    Ok(message) => {
+                        if !handoff_active {
+                            continue;
+                        }
+                        latency_tracker.observe(message.sent_at_micros);
+                        adapters.input_injector.inject_event(&message.event)?;
                     }
-                    latency_tracker.observe(message.sent_at_micros);
-                    adapters.input_injector.inject_event(&message.event)?;
+                    Err(error) => {
+                        eprintln!("dropping invalid input datagram: {error}");
+                    }
                 }
             }
         }
@@ -301,10 +312,15 @@ async fn send_control_message(
 async fn recv_control_message(
     stream: &mut TcpStream,
     cipher: &mut CipherState,
-) -> anyhow::Result<ControlMessage> {
+) -> anyhow::Result<Option<ControlMessage>> {
     let payload = read_frame(stream).await?;
-    let message = decode_control(cipher, &payload)?;
-    Ok(message)
+    match decode_control(cipher, &payload) {
+        Ok(message) => Ok(Some(message)),
+        Err(error) => {
+            eprintln!("dropping invalid control frame: {error}");
+            Ok(None)
+        }
+    }
 }
 
 async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> anyhow::Result<()> {
