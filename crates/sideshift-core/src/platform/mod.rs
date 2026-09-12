@@ -33,6 +33,7 @@ pub struct PlatformAdapters {
     pub cursor_controller: Box<dyn CursorController>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keycodes;
 
 #[cfg(target_os = "linux")]

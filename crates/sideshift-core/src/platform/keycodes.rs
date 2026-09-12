@@ -239,7 +239,7 @@ pub(crate) fn wire_to_windows_vk(wire_keycode: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{mac_keycode_to_wire, wire_to_mac_keycode};
+    use super::{mac_keycode_to_wire, windows_vk_to_wire, wire_to_mac_keycode, wire_to_windows_vk};
 
     #[test]
     fn mac_letters_roundtrip_through_wire_codes() {
@@ -261,5 +261,12 @@ mod tests {
         assert_eq!(wire_to_mac_keycode(0x27), Some(124));
         assert_eq!(wire_to_mac_keycode(0x28), Some(125));
         assert_eq!(wire_to_mac_keycode(0x26), Some(126));
+    }
+
+    #[test]
+    fn windows_wire_helpers_keep_vk_values() {
+        assert_eq!(windows_vk_to_wire(0x41), Some(0x41));
+        assert_eq!(windows_vk_to_wire(u32::from(u16::MAX) + 1), None);
+        assert_eq!(wire_to_windows_vk(0x7A), 0x7A);
     }
 }
