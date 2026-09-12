@@ -17,7 +17,7 @@ use hop_protocol::control::Edge;
 use hop_protocol::datagram::{InputEvent, MouseButton};
 
 use crate::layout::{CursorPosition, ScreenSize};
-use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode};
+use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode_for_injection};
 use crate::platform::macos_input::{
     ClickCountTracker, InputPoint, ModifierFlagsState, ModifierSnapshot,
 };
@@ -188,6 +188,7 @@ struct MacosInputInjector {
     backing_scale_y: f64,
     last_move_at: Option<Instant>,
     modifier_flags: ModifierFlagsState,
+    swap_ctrl_cmd: bool,
     unknown_wire_keycodes: HashSet<u16>,
     click_tracker: ClickCountTracker,
     click_clock_start: Instant,
@@ -209,6 +210,7 @@ impl MacosInputInjector {
             backing_scale_y,
             last_move_at: None,
             modifier_flags: ModifierFlagsState::default(),
+            swap_ctrl_cmd: true,
             unknown_wire_keycodes: HashSet::new(),
             click_tracker: ClickCountTracker::default(),
             click_clock_start: Instant::now(),
@@ -292,6 +294,10 @@ impl MacosInputInjector {
 }
 
 impl RemoteInputInjector for MacosInputInjector {
+    fn set_swap_ctrl_cmd(&mut self, enabled: bool) {
+        self.swap_ctrl_cmd = enabled;
+    }
+
     fn inject_event(&mut self, event: &InputEvent) -> Result<()> {
         match event {
             InputEvent::MouseMove { dx, dy } => {
@@ -385,10 +391,12 @@ impl RemoteInputInjector for MacosInputInjector {
                 self.buttons_down.update(*button, *pressed);
             }
             InputEvent::Key { scancode, pressed } => {
-                let Some(mac_keycode) = wire_to_mac_keycode(*scancode) else {
+                let Some(mac_keycode) =
+                    wire_to_mac_keycode_for_injection(*scancode, self.swap_ctrl_cmd)
+                else {
                     if self.unknown_wire_keycodes.insert(*scancode) {
                         eprintln!(
-                            "macOS injector: missing wire_to_mac_keycode mapping for scancode 0x{scancode:04X}"
+                            "macOS injector: missing injection keycode mapping for scancode 0x{scancode:04X}"
                         );
                     }
                     return Ok(());

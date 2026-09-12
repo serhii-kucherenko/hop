@@ -4,6 +4,7 @@
     "role": "server",
     "control_bind": "0.0.0.0:4600",
     "data_bind": "0.0.0.0:4601",
+    "swap_ctrl_cmd": true,
     "shared_secret": "replace-with-strong-passphrase",
     "screen_width": 1728,
     "screen_height": 1117

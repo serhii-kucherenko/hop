@@ -45,6 +45,8 @@ Switch matrix (server perspective): right -> client returns on left, left -> ret
 
 Windows-primary default layout: the first paired client is on the server's right (`position: "right"`), so moving to the far right edge of the Windows screen hands off to a MacBook on the right; push into the Mac's left edge to return control to Windows. Override with `hop pair --position <left|right|above|below>` if needed.
 
+On macOS clients, keyboard modifiers are swapped by default for Windows-origin shortcuts: Windows `Ctrl` is injected as Mac `Command`, and Windows `Win` key is injected as Mac `Control`. This makes `Ctrl+V`, `Ctrl+C`, `Ctrl+Z`, and similar shortcuts work naturally when controlling a Mac from a Windows keyboard. Set `local.swap_ctrl_cmd` to `false` in config to disable.
+
 Stop hop with Ctrl+C in each machine terminal; hop prints `hop stopped; local input restored` and releases local input.
 
 Manual end-to-end validation checklist: [MANUAL_E2E.md](MANUAL_E2E.md)

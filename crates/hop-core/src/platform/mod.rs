@@ -13,6 +13,7 @@ pub trait LocalInputCapture: Send {
 
 pub trait RemoteInputInjector: Send {
     fn inject_event(&mut self, event: &InputEvent) -> Result<()>;
+    fn set_swap_ctrl_cmd(&mut self, _enabled: bool) {}
 }
 
 pub trait ScreenInfoProvider: Send + Sync {

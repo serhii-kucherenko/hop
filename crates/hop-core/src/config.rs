@@ -19,6 +19,8 @@ pub struct LocalConfig {
     pub role: NodeRole,
     pub control_bind: String,
     pub data_bind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_ctrl_cmd: Option<bool>,
     pub shared_secret: String,
     pub screen_width: u32,
     pub screen_height: u32,

@@ -164,6 +164,8 @@ mod tests {
 
     use hop_protocol::datagram::MouseButton;
 
+    use crate::platform::keycodes::wire_to_mac_keycode_for_injection;
+
     use super::{ClickCountTracker, InputPoint, ModifierFlagsState};
 
     #[test]
@@ -185,6 +187,21 @@ mod tests {
 
         let after_letter_key = state.apply_key_event(0, true);
         assert_eq!(after_letter_key, baseline);
+    }
+
+    #[test]
+    fn swapped_ctrl_v_sequence_sets_command_flag_for_letter_event() {
+        let mut state = ModifierFlagsState::default();
+        let swapped_ctrl = wire_to_mac_keycode_for_injection(0xA2, true).expect("ctrl mapping");
+        let v_key = wire_to_mac_keycode_for_injection(0x56, true).expect("v mapping");
+
+        let ctrl_down = state.apply_key_event(swapped_ctrl, true);
+        assert!(ctrl_down.command);
+        assert!(!ctrl_down.control);
+
+        let v_down = state.apply_key_event(v_key, true);
+        assert!(v_down.command);
+        assert!(!v_down.control);
     }
 
     #[test]

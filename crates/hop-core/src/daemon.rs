@@ -104,6 +104,11 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
 async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
+    let swap_ctrl_cmd = config
+        .local
+        .swap_ctrl_cmd
+        .unwrap_or(cfg!(target_os = "macos"));
+    adapters.input_injector.set_swap_ctrl_cmd(swap_ctrl_cmd);
     let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
