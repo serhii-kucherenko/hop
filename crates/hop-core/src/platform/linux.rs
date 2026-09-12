@@ -5,7 +5,7 @@ use anyhow::Result;
 use hop_protocol::control::Edge;
 use hop_protocol::datagram::InputEvent;
 
-use crate::layout::{CursorPosition, ScreenSize};
+use crate::layout::{CursorPosition, ScreenBounds};
 use crate::platform::{
     CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
     ScreenInfoProvider,
@@ -65,11 +65,11 @@ impl RemoteInputInjector for LinuxMockInputInjector {
 struct LinuxMockScreenProvider;
 
 impl ScreenInfoProvider for LinuxMockScreenProvider {
-    fn screen_size(&self) -> Result<ScreenSize> {
-        Ok(ScreenSize {
-            width: DEFAULT_SCREEN_WIDTH,
-            height: DEFAULT_SCREEN_HEIGHT,
-        })
+    fn screen_bounds(&self) -> Result<ScreenBounds> {
+        Ok(ScreenBounds::from_size(
+            DEFAULT_SCREEN_WIDTH,
+            DEFAULT_SCREEN_HEIGHT,
+        ))
     }
 }
 
@@ -85,23 +85,23 @@ impl CursorController for LinuxMockCursorController {
         Ok(())
     }
 
-    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenSize) -> Result<()> {
+    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenBounds) -> Result<()> {
         let _target = match edge {
             Edge::Left => CursorPosition {
-                x: (screen.width as i32) - 2,
-                y: (screen.height as i32) / 2,
+                x: screen.max_x() - 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Right => CursorPosition {
-                x: 1,
-                y: (screen.height as i32) / 2,
+                x: screen.origin_x + 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Top => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: (screen.height as i32) - 2,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.max_y() - 1,
             },
             Edge::Bottom => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: 1,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.origin_y + 1,
             },
         };
         Ok(())

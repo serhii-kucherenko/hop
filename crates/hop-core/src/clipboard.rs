@@ -26,6 +26,21 @@ const PNG_WRITE_FORMAT: &str = "image/png";
 
 const PNG_READ_FORMATS: [&str; 3] = ["public.png", "PNG", "image/png"];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardBackendStatus {
+    Ready,
+    Disabled { reason: String },
+}
+
+pub fn clipboard_backend_status(machine_name: &str) -> ClipboardBackendStatus {
+    match SystemClipboardBackend::new(machine_name.to_owned()) {
+        Ok(_) => ClipboardBackendStatus::Ready,
+        Err(error) => ClipboardBackendStatus::Disabled {
+            reason: error.to_string(),
+        },
+    }
+}
+
 pub(crate) struct ClipboardSync {
     machine_name: String,
     backend: Box<dyn ClipboardBackend>,

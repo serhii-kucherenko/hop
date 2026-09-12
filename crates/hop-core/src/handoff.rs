@@ -1,7 +1,7 @@
 use hop_protocol::control::Edge;
 use hop_protocol::datagram::InputEvent;
 
-use crate::layout::{detect_edge_crossing, CursorPosition, ScreenSize, SpatialLayout};
+use crate::layout::{detect_edge_crossing, CursorPosition, ScreenBounds, SpatialLayout};
 
 const STICKY_OUTBOUND_SAMPLE_THRESHOLD: u8 = 2;
 const STICKY_OUTBOUND_DISTANCE_THRESHOLD: i32 = 6;
@@ -43,7 +43,7 @@ impl HandoffController {
     pub fn on_local_cursor(
         &mut self,
         cursor: CursorPosition,
-        screen: ScreenSize,
+        screen: ScreenBounds,
         layout: &SpatialLayout,
         events: &[InputEvent],
     ) -> HandoffAction {
@@ -121,7 +121,7 @@ impl HandoffController {
     fn detect_sticky_edge(
         &self,
         cursor: CursorPosition,
-        screen: ScreenSize,
+        screen: ScreenBounds,
         layout: &SpatialLayout,
         events: &[InputEvent],
     ) -> Option<Edge> {
@@ -198,10 +198,10 @@ fn outbound_distance_for_edge(edge: Edge, events: &[InputEvent]) -> i32 {
     outbound
 }
 
-fn max_x(screen: ScreenSize) -> i32 {
-    screen.width.saturating_sub(1) as i32
+fn max_x(screen: ScreenBounds) -> i32 {
+    screen.max_x()
 }
 
-fn max_y(screen: ScreenSize) -> i32 {
-    screen.height.saturating_sub(1) as i32
+fn max_y(screen: ScreenBounds) -> i32 {
+    screen.max_y()
 }

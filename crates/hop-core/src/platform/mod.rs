@@ -1,7 +1,7 @@
 use anyhow::Result;
 use hop_protocol::datagram::InputEvent;
 
-use crate::layout::{CursorPosition, ScreenSize};
+use crate::layout::{CursorPosition, ScreenBounds};
 
 pub trait LocalInputCapture: Send {
     fn poll_cursor_position(&mut self) -> Result<Option<CursorPosition>>;
@@ -17,7 +17,7 @@ pub trait RemoteInputInjector: Send {
 }
 
 pub trait ScreenInfoProvider: Send + Sync {
-    fn screen_size(&self) -> Result<ScreenSize>;
+    fn screen_bounds(&self) -> Result<ScreenBounds>;
 }
 
 pub trait CursorController: Send {
@@ -26,7 +26,7 @@ pub trait CursorController: Send {
     fn warp_cursor_to_safe_point(
         &mut self,
         edge: hop_protocol::control::Edge,
-        screen: ScreenSize,
+        screen: ScreenBounds,
     ) -> Result<()>;
 }
 

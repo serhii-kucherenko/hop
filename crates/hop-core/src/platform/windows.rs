@@ -22,14 +22,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, PeekMessageW,
     PostThreadMessageW, SetCursorPos, SetWindowsHookExW, ShowCursor, TranslateMessage,
     UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED,
-    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
-use crate::layout::{CursorPosition, ScreenSize};
-use crate::platform::keycodes::{windows_vk_to_wire, wire_to_windows_vk};
+use crate::layout::{CursorPosition, ScreenBounds};
+use crate::platform::keycodes::{windows_vk_to_wire, wire_to_windows_vk_for_injection};
 use crate::platform::{
     mouse_move_event_from_points, CursorController, LocalInputCapture, PermissionStatus,
     PlatformAdapters, RemoteInputInjector, ScreenInfoProvider,
@@ -212,6 +213,10 @@ impl Drop for WindowsInputCapture {
 struct WindowsInputInjector;
 
 impl RemoteInputInjector for WindowsInputInjector {
+    fn set_swap_ctrl_cmd(&mut self, enabled: bool) {
+        WINDOWS_SWAP_CTRL_CMD.store(enabled, Ordering::SeqCst);
+    }
+
     fn inject_event(&mut self, event: &InputEvent) -> Result<()> {
         match event {
             InputEvent::MouseMove { dx, dy } => {
@@ -242,7 +247,8 @@ impl RemoteInputInjector for WindowsInputInjector {
                 send_inputs(&[mouse_input(0, 0, flags, mouse_data)])?;
             }
             InputEvent::Key { scancode, pressed } => {
-                let vk = wire_to_windows_vk(*scancode);
+                let swap_ctrl_cmd = WINDOWS_SWAP_CTRL_CMD.load(Ordering::SeqCst);
+                let vk = wire_to_windows_vk_for_injection(*scancode, swap_ctrl_cmd);
                 send_inputs(&[keyboard_input(vk, *pressed)])?;
             }
             InputEvent::Scroll { dx, dy } => match (*dx != 0, *dy != 0) {
@@ -270,10 +276,23 @@ impl RemoteInputInjector for WindowsInputInjector {
 struct WindowsScreenProvider;
 
 impl ScreenInfoProvider for WindowsScreenProvider {
-    fn screen_size(&self) -> Result<ScreenSize> {
-        let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        Ok(ScreenSize {
+    fn screen_bounds(&self) -> Result<ScreenBounds> {
+        let origin_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let origin_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        if width <= 0 || height <= 0 {
+            let fallback_width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+            let fallback_height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+            return Ok(ScreenBounds::from_size(
+                fallback_width.max(1) as u32,
+                fallback_height.max(1) as u32,
+            ));
+        }
+
+        Ok(ScreenBounds {
+            origin_x,
+            origin_y,
             width: width as u32,
             height: height as u32,
         })
@@ -310,29 +329,31 @@ impl CursorController for WindowsCursorController {
         Err(anyhow!("ShowCursor(true) did not converge"))
     }
 
-    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenSize) -> Result<()> {
+    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenBounds) -> Result<()> {
         let target = match edge {
             Edge::Left => CursorPosition {
-                x: (screen.width as i32) - 2,
-                y: (screen.height as i32) / 2,
+                x: screen.max_x() - 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Right => CursorPosition {
-                x: 1,
-                y: (screen.height as i32) / 2,
+                x: screen.origin_x + 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Top => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: (screen.height as i32) - 2,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.max_y() - 1,
             },
             Edge::Bottom => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: 1,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.origin_y + 1,
             },
         };
         unsafe { SetCursorPos(target.x, target.y) }.context("SetCursorPos failed")?;
         Ok(())
     }
 }
+
+static WINDOWS_SWAP_CTRL_CMD: AtomicBool = AtomicBool::new(false);
 
 fn start_hook_thread() -> Result<HookThread> {
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);

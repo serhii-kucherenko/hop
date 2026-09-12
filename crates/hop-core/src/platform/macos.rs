@@ -16,7 +16,7 @@ use core_graphics::geometry::CGPoint;
 use hop_protocol::control::Edge;
 use hop_protocol::datagram::{InputEvent, MouseButton};
 
-use crate::layout::{CursorPosition, ScreenSize};
+use crate::layout::{CursorPosition, ScreenBounds};
 use crate::platform::keycodes::{mac_keycode_to_wire, wire_to_mac_keycode_for_injection};
 use crate::platform::macos_input::{
     ClickCountTracker, InputPoint, ModifierFlagsState, ModifierSnapshot,
@@ -435,12 +435,8 @@ impl RemoteInputInjector for MacosInputInjector {
 struct MacosScreenProvider;
 
 impl ScreenInfoProvider for MacosScreenProvider {
-    fn screen_size(&self) -> Result<ScreenSize> {
-        let bounds = CGDisplay::main().bounds();
-        Ok(ScreenSize {
-            width: bounds.size.width as u32,
-            height: bounds.size.height as u32,
-        })
+    fn screen_bounds(&self) -> Result<ScreenBounds> {
+        Ok(detect_display_union_bounds())
     }
 }
 
@@ -480,23 +476,23 @@ impl CursorController for MacosCursorController {
         Ok(())
     }
 
-    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenSize) -> Result<()> {
+    fn warp_cursor_to_safe_point(&mut self, edge: Edge, screen: ScreenBounds) -> Result<()> {
         let target = match edge {
             Edge::Left => CursorPosition {
-                x: (screen.width as i32) - 2,
-                y: (screen.height as i32) / 2,
+                x: screen.max_x() - 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Right => CursorPosition {
-                x: 1,
-                y: (screen.height as i32) / 2,
+                x: screen.origin_x + 1,
+                y: screen.origin_y + (screen.height as i32) / 2,
             },
             Edge::Top => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: (screen.height as i32) - 2,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.max_y() - 1,
             },
             Edge::Bottom => CursorPosition {
-                x: (screen.width as i32) / 2,
-                y: 1,
+                x: screen.origin_x + (screen.width as i32) / 2,
+                y: screen.origin_y + 1,
             },
         };
         CGDisplay::warp_mouse_cursor_position(CGPoint::new(target.x as f64, target.y as f64))
@@ -526,6 +522,47 @@ fn display_backing_scale() -> (f64, f64) {
     let scale_x = display.pixels_wide() as f64 / width;
     let scale_y = display.pixels_high() as f64 / height;
     (scale_x.max(1.0), scale_y.max(1.0))
+}
+
+fn detect_display_union_bounds() -> ScreenBounds {
+    let display_ids = CGDisplay::active_displays()
+        .ok()
+        .filter(|displays| !displays.is_empty());
+    let mut iter = display_ids
+        .map(|display_ids| {
+            display_ids
+                .into_iter()
+                .map(CGDisplay::new)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![CGDisplay::main()])
+        .into_iter();
+    let Some(first_display) = iter.next() else {
+        return ScreenBounds::from_size(1, 1);
+    };
+
+    let first_bounds = first_display.bounds();
+    let mut min_x = first_bounds.origin.x;
+    let mut min_y = first_bounds.origin.y;
+    let mut max_x = first_bounds.origin.x + first_bounds.size.width;
+    let mut max_y = first_bounds.origin.y + first_bounds.size.height;
+
+    for display in iter {
+        let bounds = display.bounds();
+        min_x = min_x.min(bounds.origin.x);
+        min_y = min_y.min(bounds.origin.y);
+        max_x = max_x.max(bounds.origin.x + bounds.size.width);
+        max_y = max_y.max(bounds.origin.y + bounds.size.height);
+    }
+
+    let width = (max_x - min_x).max(1.0).round() as u32;
+    let height = (max_y - min_y).max(1.0).round() as u32;
+    ScreenBounds {
+        origin_x: min_x.round() as i32,
+        origin_y: min_y.round() as i32,
+        width,
+        height,
+    }
 }
 
 fn start_event_tap(state: Arc<MacosCaptureState>) -> Result<()> {
