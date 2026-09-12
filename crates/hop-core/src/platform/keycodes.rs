@@ -257,14 +257,17 @@ pub(crate) fn wire_to_mac_keycode_for_injection(
     wire_to_mac_keycode(wire_keycode)
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn windows_vk_to_wire(vk: u32) -> Option<u16> {
     u16::try_from(vk).ok()
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn wire_to_windows_vk(wire_keycode: u16) -> u16 {
     wire_keycode
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn wire_to_windows_vk_for_injection(wire_keycode: u16, swap_ctrl_cmd: bool) -> u16 {
     if swap_ctrl_cmd {
         match wire_keycode {
