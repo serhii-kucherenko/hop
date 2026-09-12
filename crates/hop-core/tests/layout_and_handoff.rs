@@ -90,6 +90,30 @@ fn handoff_release_returns_focus_locally() {
 }
 
 #[test]
+fn force_local_resets_remote_focus_state() {
+    let screen = ScreenSize {
+        width: 1920,
+        height: 1080,
+    };
+    let layout = two_machine_layout();
+    let mut controller = HandoffController::new("macbook-pro");
+    let _ = controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
+
+    controller.force_local();
+
+    assert_eq!(controller.focus_state(), &FocusState::Local);
+    let action =
+        controller.on_local_cursor(CursorPosition { x: 1925, y: 540 }, screen, &layout, &[]);
+    assert_eq!(
+        action,
+        HandoffAction::Begin {
+            target_machine: "windows-box".to_owned(),
+            edge: Edge::Right
+        }
+    );
+}
+
+#[test]
 fn no_handoff_when_crossing_without_neighbor() {
     let layout = SpatialLayout::new(vec![SpatialNeighbor {
         machine_name: "windows-box".to_owned(),
