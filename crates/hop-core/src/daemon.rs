@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{timeout, Duration, Instant, MissedTickBehavior};
 
+use crate::clipboard::{ClipboardSync, CLIPBOARD_POLL_INTERVAL};
 use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
@@ -24,6 +25,7 @@ use crate::layout::{
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
 
 const STOPPED_MESSAGE: &str = "hop stopped; local input restored";
+const MAX_CONTROL_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 pub async fn run(
     config: Config,
@@ -39,6 +41,7 @@ pub async fn run(
 
 async fn run_server(config: Config) -> anyhow::Result<()> {
     let mut adapters = build_platform_adapters();
+    let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
         .screen_size()
@@ -79,6 +82,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         match run_server_session(
             &config,
             &mut adapters,
+            &mut clipboard_sync,
             local_screen,
             &udp_socket,
             stream,
@@ -100,6 +104,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
 async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
+    let mut clipboard_sync = ClipboardSync::new(&config.local.machine_name);
     let local_screen = adapters
         .screen_provider
         .screen_size()
@@ -177,10 +182,13 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
             }
         };
         println!("server info: {server_hello:?}");
+        clipboard_sync.on_control_channel_reset();
 
         let mut handoff_active = false;
         let mut owner_machine = peer.machine_name.clone();
         let mut reconnect_required = false;
+        let mut clipboard_ticker = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
+        clipboard_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         while !reconnect_required {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -258,7 +266,25 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
                                 reconnect_required = true;
                             }
                         }
+                        ControlMessage::ClipboardSync {
+                            source_machine,
+                            sequence,
+                            sent_at_micros: _sent_at_micros,
+                            content,
+                        } => {
+                            clipboard_sync.apply_remote_update(&source_machine, sequence, content);
+                        }
                         other => println!("control message: {other:?}"),
+                    }
+                }
+                _ = clipboard_ticker.tick() => {
+                    if let Some(clipboard_message) = clipboard_sync.poll_local_update(handoff_active) {
+                        if let Err(error) = send_control_message(&mut stream, &mut cipher, &clipboard_message).await {
+                            eprintln!("failed to send clipboard sync: {error}; reconnecting");
+                            reconnect_required = true;
+                            handoff_active = false;
+                            continue;
+                        }
                     }
                 }
                 datagram = udp_socket.recv_from(&mut datagram_buffer) => {
@@ -349,6 +375,7 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
 async fn run_server_session(
     config: &Config,
     adapters: &mut crate::platform::PlatformAdapters,
+    clipboard_sync: &mut ClipboardSync,
     local_screen: ScreenSize,
     udp_socket: &UdpSocket,
     mut stream: TcpStream,
@@ -381,12 +408,15 @@ async fn run_server_session(
     };
     send_control_message(&mut stream, &mut cipher, &hello_msg).await?;
     println!("control channel encrypted and ready");
+    clipboard_sync.on_control_channel_reset();
 
     let mut handoff = HandoffController::new(config.local.machine_name.clone());
     let mut handoff_committed = false;
     let mut cursor_hidden = false;
     let mut ticker = tokio::time::interval(Duration::from_millis(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut clipboard_ticker = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
+    clipboard_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -556,6 +586,23 @@ async fn run_server_session(
                     }
                 }
             }
+            _ = clipboard_ticker.tick() => {
+                let clipboard_enabled =
+                    handoff_committed && matches!(handoff.focus_state(), FocusState::Remote { .. });
+                if let Some(clipboard_message) = clipboard_sync.poll_local_update(clipboard_enabled) {
+                    if let Err(error) = send_control_message(&mut stream, &mut cipher, &clipboard_message).await {
+                        recover_server_focus_local(
+                            &mut handoff,
+                            adapters.input_capture.as_mut(),
+                            adapters.cursor_controller.as_mut(),
+                            &mut cursor_hidden,
+                            local_screen,
+                            &format!("failed to send clipboard sync: {error}"),
+                        );
+                        return Err(error);
+                    }
+                }
+            }
             result = recv_control_message(&mut stream, &mut cipher) => {
                 match result {
                     Ok(Some(ControlMessage::HandoffStartAck { from_machine, to_machine, accepted, reason })) => {
@@ -592,6 +639,14 @@ async fn run_server_session(
                             );
                             return Err(error);
                         }
+                    }
+                    Ok(Some(ControlMessage::ClipboardSync {
+                        source_machine,
+                        sequence,
+                        sent_at_micros: _sent_at_micros,
+                        content,
+                    })) => {
+                        clipboard_sync.apply_remote_update(&source_machine, sequence, content);
                     }
                     Ok(Some(other)) => println!("control message: {other:?}"),
                     Ok(None) => {}
@@ -827,7 +882,7 @@ async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> anyhow::Result<(
 
 async fn read_frame(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
     let len = stream.read_u32().await? as usize;
-    if len > 1024 * 1024 {
+    if len > MAX_CONTROL_FRAME_BYTES {
         anyhow::bail!("refusing oversized frame ({len} bytes)");
     }
     let mut payload = vec![0_u8; len];

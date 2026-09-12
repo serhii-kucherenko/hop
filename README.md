@@ -64,6 +64,22 @@ Use `--config <path>` with any command to override the config location.
 
 `hop` keeps input ownership on the server machine and forwards events over LAN to the client machine. Control messages run on an encrypted TCP channel, and input events run on encrypted UDP datagrams to minimize handoff latency. It is a network handoff model, not Bluetooth re-pairing.
 
+### Clipboard sync (MVP)
+
+During remote ownership, `hop` also syncs clipboard changes over the encrypted control channel (TCP). This path is separate from the UDP input hot path.
+
+Supported clipboard payloads:
+- Text (Unicode)
+- Images (`PNG`)
+- Files (staged copy; files are transferred and written to a temporary staging directory on the receiving machine, then placed on that machine's clipboard as local file paths)
+
+Safety/size limits in MVP:
+- text: up to 1,000,000 bytes
+- image (`PNG`): up to 8 MiB
+- files: up to 8 files, each up to 8 MiB, with 24 MiB total payload cap
+
+Staged clipboard files are written under the OS temp directory in `hop-clipboard/<machine>/...`.
+
 Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like passwords, and do not share them outside your trusted network.
 
 ## Permissions and known gaps

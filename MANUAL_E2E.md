@@ -13,7 +13,7 @@ Position matrix (from server perspective):
 - client above: enter on server top edge, return on client bottom edge
 - client below: enter on server bottom edge, return on client top edge
 
-For each position above, run all cases A-J:
+For each position above, run all cases A-M:
 
 A. Enter edge once:
 - Push into the configured server enter edge.
@@ -80,3 +80,13 @@ L. Mouse click semantics and side buttons:
 - Expected: each button down/up pair is delivered correctly without missed clicks.
 - On a mouse with side buttons, press Back (X1) and Forward (X2) in a browser on the client.
 - Expected: client navigates back/forward as if locally clicked.
+
+M. Clipboard sync (bidirectional while remote ownership is active):
+- Enter remote mode and copy plain text on the active machine.
+- Expected: text paste on the other machine matches exactly, including Unicode characters.
+- Copy an image (PNG source is preferred) on the active machine.
+- Expected: image pastes on the other machine.
+- Copy one or more files on the active machine.
+- Expected: files appear in the other machine clipboard and can be pasted from a staged local temp location.
+- While still remote, repeat text/image/file copy from the other side after return handoff.
+- Expected: sync works in both directions without ping-pong loops or repeated clipboard churn.
