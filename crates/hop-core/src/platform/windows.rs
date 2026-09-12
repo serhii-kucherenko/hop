@@ -15,17 +15,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
-    VIRTUAL_KEY,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, PeekMessageW,
     PostThreadMessageW, SetCursorPos, SetWindowsHookExW, ShowCursor, TranslateMessage,
-    UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-    LLKHF_LOWER_IL_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SM_CXSCREEN,
-    SM_CYSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED,
+    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::layout::{CursorPosition, ScreenSize};
@@ -38,6 +38,8 @@ use crate::platform::{
 const MAX_QUEUED_EVENTS: usize = 2_048;
 const WHEEL_DELTA: i32 = 120;
 const HOOK_START_TIMEOUT: Duration = Duration::from_secs(2);
+const XBUTTON1_DATA: u16 = 0x0001;
+const XBUTTON2_DATA: u16 = 0x0002;
 
 static CAPTURE_STATE: OnceLock<Arc<WindowsCaptureState>> = OnceLock::new();
 static HOOK_THREAD_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -225,15 +227,19 @@ impl RemoteInputInjector for WindowsInputInjector {
                 send_inputs(&[input])?;
             }
             InputEvent::MouseButton { button, pressed } => {
-                let flags = match (button, pressed) {
-                    (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
-                    (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
-                    (MouseButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
-                    (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
-                    (MouseButton::Middle, true) => MOUSEEVENTF_MIDDLEDOWN,
-                    (MouseButton::Middle, false) => MOUSEEVENTF_MIDDLEUP,
+                let (flags, mouse_data) = match (button, pressed) {
+                    (MouseButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
+                    (MouseButton::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
+                    (MouseButton::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
+                    (MouseButton::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
+                    (MouseButton::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
+                    (MouseButton::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
+                    (MouseButton::X1, true) => (MOUSEEVENTF_XDOWN, u32::from(XBUTTON1_DATA)),
+                    (MouseButton::X1, false) => (MOUSEEVENTF_XUP, u32::from(XBUTTON1_DATA)),
+                    (MouseButton::X2, true) => (MOUSEEVENTF_XDOWN, u32::from(XBUTTON2_DATA)),
+                    (MouseButton::X2, false) => (MOUSEEVENTF_XUP, u32::from(XBUTTON2_DATA)),
                 };
-                send_inputs(&[mouse_input(0, 0, flags, 0)])?;
+                send_inputs(&[mouse_input(0, 0, flags, mouse_data)])?;
             }
             InputEvent::Key { scancode, pressed } => {
                 let vk = wire_to_windows_vk(*scancode);
@@ -377,7 +383,7 @@ fn run_hook_loop(startup_tx: &mpsc::SyncSender<Result<u32, String>>) -> Result<(
             break;
         }
         unsafe {
-            TranslateMessage(&message);
+            let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
@@ -456,6 +462,18 @@ fn mouse_event_from_hook(
             button: MouseButton::Middle,
             pressed: false,
         }),
+        WM_XBUTTONDOWN => {
+            xbutton_from_hook_data(hook.mouseData).map(|button| InputEvent::MouseButton {
+                button,
+                pressed: true,
+            })
+        }
+        WM_XBUTTONUP => {
+            xbutton_from_hook_data(hook.mouseData).map(|button| InputEvent::MouseButton {
+                button,
+                pressed: false,
+            })
+        }
         WM_MOUSEWHEEL => {
             let dy = normalize_wheel_delta(hiword_signed(hook.mouseData));
             (dy != 0).then_some(InputEvent::Scroll { dx: 0, dy })
@@ -562,6 +580,18 @@ fn wheel_data(units: i16) -> u32 {
 
 fn hiword_signed(value: u32) -> i16 {
     ((value >> 16) as u16) as i16
+}
+
+fn xbutton_from_hook_data(mouse_data: u32) -> Option<MouseButton> {
+    match hiword_unsigned(mouse_data) {
+        XBUTTON1_DATA => Some(MouseButton::X1),
+        XBUTTON2_DATA => Some(MouseButton::X2),
+        _ => None,
+    }
+}
+
+fn hiword_unsigned(value: u32) -> u16 {
+    (value >> 16) as u16
 }
 
 fn normalize_wheel_delta(raw_delta: i16) -> i16 {

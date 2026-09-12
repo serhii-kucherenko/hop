@@ -2,7 +2,9 @@ use hop_protocol::auth::{
     build_client_hello, build_client_proof, build_server_challenge, derive_session_key,
     verify_client_proof, verify_server_challenge,
 };
-use hop_protocol::control::{ControlMessage, Edge, NodeRole, ScreenSize};
+use hop_protocol::control::{
+    ClipboardContent, ClipboardFile, ControlMessage, Edge, NodeRole, ScreenSize,
+};
 use hop_protocol::crypto::CipherState;
 use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram, InputEvent};
 use hop_protocol::frame::{decode_control, encode_control};
@@ -59,6 +61,28 @@ fn handoff_ack_roundtrip_through_cipher() {
     let packet = encode_control(&mut sender, &message).expect("encode control");
     let decoded = decode_control(&mut receiver, &packet).expect("decode control");
 
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn clipboard_sync_roundtrip_through_cipher() {
+    let key = [3_u8; 32];
+    let mut sender = CipherState::new(&key);
+    let mut receiver = CipherState::new(&key);
+    let message = ControlMessage::ClipboardSync {
+        source_machine: "windows".to_owned(),
+        sequence: 42,
+        sent_at_micros: 123_456,
+        content: ClipboardContent::Files {
+            files: vec![ClipboardFile {
+                name: "notes.txt".to_owned(),
+                bytes: b"clipboard payload".to_vec(),
+            }],
+        },
+    };
+
+    let packet = encode_control(&mut sender, &message).expect("encode control");
+    let decoded = decode_control(&mut receiver, &packet).expect("decode control");
     assert_eq!(decoded, message);
 }
 

@@ -7,6 +7,8 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
+    X1,
+    X2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +98,8 @@ fn encode_event(event: &InputEvent, out: &mut [u8]) -> Result<usize, DatagramErr
                 MouseButton::Left => 0,
                 MouseButton::Right => 1,
                 MouseButton::Middle => 2,
+                MouseButton::X1 => 3,
+                MouseButton::X2 => 4,
             };
             out[2] = u8::from(*pressed);
             Ok(3)
@@ -143,6 +147,8 @@ fn decode_event(raw: &[u8]) -> Result<InputEvent, DatagramError> {
                 0 => MouseButton::Left,
                 1 => MouseButton::Right,
                 2 => MouseButton::Middle,
+                3 => MouseButton::X1,
+                4 => MouseButton::X2,
                 _ => return Err(DatagramError::DecodeFailed),
             };
             let pressed = match raw[2] {
@@ -173,5 +179,39 @@ fn decode_event(raw: &[u8]) -> Result<InputEvent, DatagramError> {
             Ok(InputEvent::Scroll { dx, dy })
         }
         _ => Err(DatagramError::DecodeFailed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_event, encode_event, DatagramError, InputEvent, MouseButton};
+
+    #[test]
+    fn mouse_buttons_encode_and_decode_all_variants() {
+        let buttons = [
+            MouseButton::Left,
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::X1,
+            MouseButton::X2,
+        ];
+
+        for button in buttons {
+            let mut encoded = [0_u8; 5];
+            let event = InputEvent::MouseButton {
+                button,
+                pressed: true,
+            };
+            let encoded_len = encode_event(&event, &mut encoded).expect("event should encode");
+            assert_eq!(encoded_len, 3);
+            let decoded = decode_event(&encoded[..encoded_len]).expect("event should decode");
+            assert_eq!(decoded, event);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_unknown_mouse_button_code() {
+        let result = decode_event(&[1, 9, 1]);
+        assert!(matches!(result, Err(DatagramError::DecodeFailed)));
     }
 }

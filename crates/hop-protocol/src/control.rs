@@ -22,6 +22,19 @@ pub struct ScreenSize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardContent {
+    Text { text: String },
+    ImagePng { png_bytes: Vec<u8> },
+    Files { files: Vec<ClipboardFile> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
     Hello {
         machine_name: String,
@@ -52,5 +65,11 @@ pub enum ControlMessage {
     },
     Pong {
         at_millis: u64,
+    },
+    ClipboardSync {
+        source_machine: String,
+        sequence: u64,
+        sent_at_micros: u64,
+        content: ClipboardContent,
     },
 }

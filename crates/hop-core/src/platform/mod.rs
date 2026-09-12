@@ -65,6 +65,8 @@ fn saturating_i32_to_i16(value: i32) -> i16 {
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keycodes;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod macos_input;
 
 #[cfg(target_os = "linux")]
 mod linux;

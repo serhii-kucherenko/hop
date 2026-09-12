@@ -15,6 +15,8 @@ thiserror.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 hop-protocol = { path = "../hop-protocol" }
+clipboard-rs = { version = "0.3.5", default-features = false }
+sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"
