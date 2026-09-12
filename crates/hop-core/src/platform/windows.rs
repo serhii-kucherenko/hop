@@ -31,7 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::keycodes::{windows_vk_to_wire, wire_to_windows_vk};
 use crate::platform::{
-    CursorController, LocalInputCapture, PlatformAdapters, RemoteInputInjector, ScreenInfoProvider,
+    CursorController, LocalInputCapture, PermissionStatus, PlatformAdapters, RemoteInputInjector,
+    ScreenInfoProvider,
 };
 
 const MAX_QUEUED_EVENTS: usize = 2_048;
@@ -48,6 +49,10 @@ pub fn build_platform_adapters() -> PlatformAdapters {
         screen_provider: Box::new(WindowsScreenProvider),
         cursor_controller: Box::new(WindowsCursorController::new()),
     }
+}
+
+pub fn permission_status() -> PermissionStatus {
+    PermissionStatus::Unknown
 }
 
 struct WindowsCaptureState {

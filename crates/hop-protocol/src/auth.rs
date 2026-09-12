@@ -15,6 +15,7 @@ const SESSION_LABEL: &[u8] = b"hop-session-v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthHello {
     pub machine_name: String,
+    pub udp_port: u16,
     pub protocol_version: u16,
     pub client_nonce: [u8; 16],
 }
@@ -40,11 +41,12 @@ pub enum AuthError {
     KeyDerivationFailed,
 }
 
-pub fn build_client_hello(machine_name: &str, rng: &mut impl Rng) -> AuthHello {
+pub fn build_client_hello(machine_name: &str, udp_port: u16, rng: &mut impl Rng) -> AuthHello {
     let mut nonce = [0_u8; 16];
     rng.fill(&mut nonce);
     AuthHello {
         machine_name: machine_name.to_owned(),
+        udp_port,
         protocol_version: PROTOCOL_VERSION,
         client_nonce: nonce,
     }
@@ -62,6 +64,7 @@ pub fn build_server_challenge(
         AUTH_LABEL,
         &[
             hello.machine_name.as_bytes(),
+            &hello.udp_port.to_be_bytes(),
             &hello.client_nonce,
             &server_nonce,
             &hello.protocol_version.to_be_bytes(),
@@ -81,6 +84,7 @@ pub fn verify_server_challenge(
         AUTH_LABEL,
         &[
             hello.machine_name.as_bytes(),
+            &hello.udp_port.to_be_bytes(),
             &hello.client_nonce,
             &challenge.server_nonce,
             &hello.protocol_version.to_be_bytes(),
@@ -104,6 +108,7 @@ pub fn build_client_proof(
         PROOF_LABEL,
         &[
             hello.machine_name.as_bytes(),
+            &hello.udp_port.to_be_bytes(),
             &challenge.server_nonce,
             &hello.client_nonce,
             &hello.protocol_version.to_be_bytes(),
@@ -124,6 +129,7 @@ pub fn verify_client_proof(
         PROOF_LABEL,
         &[
             hello.machine_name.as_bytes(),
+            &hello.udp_port.to_be_bytes(),
             &challenge.server_nonce,
             &hello.client_nonce,
             &hello.protocol_version.to_be_bytes(),

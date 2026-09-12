@@ -26,6 +26,13 @@ pub trait CursorController: Send {
     ) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionStatus {
+    Granted,
+    Missing,
+    Unknown,
+}
+
 pub struct PlatformAdapters {
     pub input_capture: Box<dyn LocalInputCapture>,
     pub input_injector: Box<dyn RemoteInputInjector>,
@@ -39,14 +46,14 @@ pub(crate) mod keycodes;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::build_platform_adapters;
+pub use linux::{build_platform_adapters, permission_status};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::build_platform_adapters;
+pub use macos::{build_platform_adapters, permission_status};
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
-pub use windows::build_platform_adapters;
+pub use windows::{build_platform_adapters, permission_status};

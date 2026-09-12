@@ -4,9 +4,16 @@ hop forwards mouse and keyboard input between two machines over a local network.
 
 Latency budget: 1-3ms target and 5ms hard max on wired LAN; Wi-Fi is best-effort and may exceed that.
 
-## Quick start (Mac primary -> Windows secondary)
+## Quick start
 
-1. Build `hop` on both machines.
+1. Install `hop` on each machine.
+
+Prefer release binaries from GitHub Releases:
+
+- macOS: `hop-x86_64-apple-darwin.tar.gz` or `hop-aarch64-apple-darwin.tar.gz`
+- Windows: `hop-x86_64-pc-windows-msvc.zip`
+
+If release binaries are not available yet, build locally:
 
 ```bash
 git clone https://github.com/serhii-kucherenko/hop.git
@@ -14,69 +21,71 @@ cd hop
 cargo build --release -p hop
 ```
 
-2. Create config files on both machines.
+2. On the machine that owns keyboard/mouse first (server):
 
 ```bash
-cp hop.example.json hop.json
+hop init --role server
+hop pair
 ```
 
-3. Edit `hop.json` on each machine.
-   - Keep the same `shared_secret` on both.
-   - Set `local.role` to `server` on the primary machine and `client` on the secondary.
-   - Set `peers` so each machine points to the other machine's IP/ports.
+`hop pair` prints a LAN-only pairing code and LAN IP list.
 
-Minimal shape:
-
-```json
-{
-  "local": {
-    "machine_name": "macbook-pro",
-    "role": "server",
-    "control_bind": "0.0.0.0:4600",
-    "data_bind": "0.0.0.0:4601",
-    "shared_secret": "replace-with-strong-passphrase",
-    "screen_width": 1728,
-    "screen_height": 1117
-  },
-  "peers": [
-    {
-      "machine_name": "windows-desktop",
-      "control_addr": "192.168.1.52:4600",
-      "data_addr": "192.168.1.52:4601",
-      "position": "right"
-    }
-  ]
-}
-```
-
-4. On macOS, grant permissions before first real run.
-   - System Settings -> Privacy & Security -> Accessibility
-   - System Settings -> Privacy & Security -> Input Monitoring
-   - Add the `hop` binary (or Terminal while developing), enable both, then relaunch the process.
-
-5. Start server on the primary machine.
+3. On the second machine (client):
 
 ```bash
-./target/release/hop run --config hop.json --role server
+hop init --role client
+hop pair <code-from-server>
 ```
 
-6. Start client on the secondary machine.
+Alternative when you already know server host + shared secret:
 
 ```bash
-./target/release/hop run --config hop.json --role client
+hop join <server-host> --secret <shared-secret>
 ```
 
-7. Flick the cursor across the configured edge on the primary machine; cursor and keyboard focus should follow on the secondary machine.
+4. Run onboarding checks:
+
+```bash
+hop doctor
+```
+
+`hop doctor` reports config presence, secret status, peer control reachability, permission status, and screen size. It exits non-zero on hard blockers.
+
+5. Start both sides:
+
+Server:
+
+```bash
+hop run --role server
+```
+
+Client:
+
+```bash
+hop run --role client
+```
+
+6. Flick across the configured edge on the server machine.
+
+Use `--config <path>` with any command if you do not want `./hop.json`.
+
+## Permissions
+
+- macOS: Accessibility + Input Monitoring are required. `hop doctor --open-permissions` can open the relevant System Settings panes.
+- Windows: hook/injection reliability is highest when `hop` and target apps run at matching privilege levels (same elevation).
 
 ## How it works
 
 `hop` keeps input ownership on the server machine and forwards events over LAN to the client machine. Control messages run on an encrypted TCP channel, and input events run on encrypted UDP datagrams to minimize handoff latency. It is a network handoff model, not Bluetooth re-pairing.
+
+Pairing is LAN-only in MVP. Treat pairing codes and shared secrets like passwords, and do not share them outside your trusted network.
 
 ## Permissions and known gaps
 
 - macOS secure input contexts (some password/login flows) can block keyboard capture/injection.
 - Windows elevated or secure desktop surfaces (UAC/admin contexts) can block hooks or injection when privilege levels do not match.
 - Linux remains mock-only in CI; native desktop capture/injection validation is focused on macOS and Windows.
+- iOS/iPadOS are not handoff targets.
 
 ## More detail
 
