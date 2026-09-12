@@ -1,9 +1,9 @@
-use sideshift_core::handoff::{FocusState, HandoffAction, HandoffController};
-use sideshift_core::layout::{
+use hop_core::handoff::{FocusState, HandoffAction, HandoffController};
+use hop_core::layout::{
     detect_edge_crossing, CursorPosition, RelativePosition, ScreenSize, SpatialLayout,
     SpatialNeighbor,
 };
-use sideshift_protocol::control::Edge;
+use hop_protocol::control::Edge;
 
 fn two_machine_layout() -> SpatialLayout {
     SpatialLayout::new(vec![SpatialNeighbor {

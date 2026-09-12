@@ -1,6 +1,6 @@
-# Contributing to SideShift
+# Contributing to hop
 
-Thanks for helping improve SideShift.
+Thanks for helping improve hop.
 
 ## Scope for this MVP phase
 
@@ -22,7 +22,7 @@ Out of scope for now:
 3. Copy example config:
 
 ```bash
-cp sideshift.example.json sideshift.json
+cp hop.example.json hop.json
 ```
 
 ## Development checks
@@ -44,7 +44,7 @@ cargo test --workspace
 
 ## Platform implementation notes
 
-The repository uses trait boundaries in `sideshift-core/src/platform/`:
+The repository uses trait boundaries in `hop-core/src/platform/`:
 - `LocalInputCapture`
 - `RemoteInputInjector`
 - `ScreenInfoProvider`

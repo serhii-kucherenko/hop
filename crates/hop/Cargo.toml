@@ -1,5 +1,5 @@
 [package]
-name = "sideshift"
+name = "hop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,5 +9,5 @@ repository.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
-sideshift-core = { path = "../sideshift-core" }
-sideshift-protocol = { path = "../sideshift-protocol" }
+hop-core = { path = "../hop-core" }
+hop-protocol = { path = "../hop-protocol" }

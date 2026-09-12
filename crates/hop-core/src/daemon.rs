@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use rand::thread_rng;
-use sideshift_protocol::auth::{
+use hop_protocol::auth::{
     build_client_hello, build_client_proof, build_server_challenge, derive_session_key,
     verify_client_proof, verify_server_challenge, AuthChallenge, AuthHello, AuthProof,
 };
-use sideshift_protocol::control::{ControlMessage, NodeRole, ScreenSize as WireScreenSize};
-use sideshift_protocol::crypto::CipherState;
-use sideshift_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram};
-use sideshift_protocol::frame::{decode_control, decode_plain, encode_control, encode_plain};
+use hop_protocol::control::{ControlMessage, NodeRole, ScreenSize as WireScreenSize};
+use hop_protocol::crypto::CipherState;
+use hop_protocol::datagram::{decode_datagram, encode_datagram, InputDatagram};
+use hop_protocol::frame::{decode_control, decode_plain, encode_control, encode_plain};
+use rand::thread_rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{Duration, MissedTickBehavior};
@@ -53,7 +53,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     );
 
     println!(
-        "starting SideShift server on control {} (data {}), waiting for client...",
+        "starting hop server on control {} (data {}), waiting for client...",
         config.local.control_bind, config.local.data_bind
     );
     let listener = TcpListener::bind(&config.local.control_bind)
@@ -146,7 +146,7 @@ async fn run_client(config: Config, log_latency: bool) -> anyhow::Result<()> {
     let peer = config.first_peer();
     let mut adapters = build_platform_adapters();
     println!(
-        "starting SideShift client; connecting control {} and listening data {}",
+        "starting hop client; connecting control {} and listening data {}",
         peer.control_addr, config.local.data_bind
     );
 

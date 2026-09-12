@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
+use hop_protocol::control::NodeRole;
 use serde::Deserialize;
-use sideshift_protocol::control::NodeRole;
 
 use crate::layout::RelativePosition;
 

@@ -1,5 +1,5 @@
 [package]
-name = "sideshift-protocol"
+name = "hop-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

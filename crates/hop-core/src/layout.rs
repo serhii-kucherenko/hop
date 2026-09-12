@@ -1,5 +1,5 @@
+use hop_protocol::control::Edge;
 use serde::Deserialize;
-use sideshift_protocol::control::Edge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorPosition {

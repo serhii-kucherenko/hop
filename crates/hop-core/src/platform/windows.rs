@@ -7,8 +7,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use sideshift_protocol::control::Edge;
-use sideshift_protocol::datagram::{InputEvent, MouseButton};
+use hop_protocol::control::Edge;
+use hop_protocol::datagram::{InputEvent, MouseButton};
 use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -128,7 +128,7 @@ impl WindowsInputCapture {
                 Err(error) => {
                     HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
                     eprintln!(
-                        "Windows capture disabled: {error}. Low-level hooks require running SideShift in the interactive desktop session."
+                        "Windows capture disabled: {error}. Low-level hooks require running hop in the interactive desktop session."
                     );
                     None
                 }
@@ -295,7 +295,7 @@ impl CursorController for WindowsCursorController {
 fn start_hook_thread() -> Result<HookThread> {
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     let join_handle = thread::Builder::new()
-        .name("sideshift-win-capture".to_owned())
+        .name("hop-win-capture".to_owned())
         .spawn(move || {
             let startup = run_hook_loop(&startup_tx);
             if let Err(error) = startup {

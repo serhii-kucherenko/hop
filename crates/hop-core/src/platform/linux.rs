@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::env;
 
 use anyhow::Result;
-use sideshift_protocol::control::Edge;
-use sideshift_protocol::datagram::InputEvent;
+use hop_protocol::control::Edge;
+use hop_protocol::datagram::InputEvent;
 
 use crate::layout::{CursorPosition, ScreenSize};
 use crate::platform::{
@@ -29,7 +29,7 @@ struct LinuxMockInputCapture {
 
 impl LinuxMockInputCapture {
     fn from_environment() -> Self {
-        let scripted_positions = env::var("SIDESHIFT_MOCK_CURSOR_PATH")
+        let scripted_positions = env::var("HOP_MOCK_CURSOR_PATH")
             .ok()
             .and_then(|raw| parse_cursor_path(&raw))
             .unwrap_or_default();

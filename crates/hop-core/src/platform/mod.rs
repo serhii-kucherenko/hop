@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sideshift_protocol::datagram::InputEvent;
+use hop_protocol::datagram::InputEvent;
 
 use crate::layout::{CursorPosition, ScreenSize};
 
@@ -21,7 +21,7 @@ pub trait CursorController: Send {
     fn show_cursor(&mut self) -> Result<()>;
     fn warp_cursor_to_safe_point(
         &mut self,
-        edge: sideshift_protocol::control::Edge,
+        edge: hop_protocol::control::Edge,
         screen: ScreenSize,
     ) -> Result<()>;
 }

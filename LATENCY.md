@@ -1,4 +1,4 @@
-# SideShift Latency Notes (MVP)
+# hop Latency Notes (MVP)
 
 ## Targets
 
