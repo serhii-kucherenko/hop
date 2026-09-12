@@ -51,6 +51,24 @@ impl SpatialLayout {
     }
 }
 
+pub fn edge_for_peer_position(position: RelativePosition) -> Edge {
+    match position {
+        RelativePosition::Left => Edge::Left,
+        RelativePosition::Right => Edge::Right,
+        RelativePosition::Above => Edge::Top,
+        RelativePosition::Below => Edge::Bottom,
+    }
+}
+
+pub fn invert_relative_position(position: RelativePosition) -> RelativePosition {
+    match position {
+        RelativePosition::Left => RelativePosition::Right,
+        RelativePosition::Right => RelativePosition::Left,
+        RelativePosition::Above => RelativePosition::Below,
+        RelativePosition::Below => RelativePosition::Above,
+    }
+}
+
 pub fn detect_edge_crossing(position: CursorPosition, screen: ScreenSize) -> Option<Edge> {
     if position.x < 0 {
         return Some(Edge::Left);

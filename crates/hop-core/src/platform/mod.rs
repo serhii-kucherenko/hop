@@ -6,6 +6,9 @@ use crate::layout::{CursorPosition, ScreenSize};
 pub trait LocalInputCapture: Send {
     fn poll_cursor_position(&mut self) -> Result<Option<CursorPosition>>;
     fn poll_input_events(&mut self) -> Result<Vec<InputEvent>>;
+    fn set_remote_focus(&mut self, _active: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub trait RemoteInputInjector: Send {
