@@ -126,13 +126,13 @@ impl HandoffController {
         events: &[InputEvent],
     ) -> Option<Edge> {
         let mut candidates = [None, None, None, None];
-        if cursor.x <= 0 {
+        if cursor.x <= screen.origin_x {
             candidates[0] = Some(Edge::Left);
         }
         if cursor.x >= max_x(screen) {
             candidates[1] = Some(Edge::Right);
         }
-        if cursor.y <= 0 {
+        if cursor.y <= screen.origin_y {
             candidates[2] = Some(Edge::Top);
         }
         if cursor.y >= max_y(screen) {
@@ -204,4 +204,70 @@ fn max_x(screen: ScreenBounds) -> i32 {
 
 fn max_y(screen: ScreenBounds) -> i32 {
     screen.max_y()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{
+        CursorPosition, RelativePosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
+    };
+    use hop_protocol::datagram::InputEvent;
+
+    fn left_peer_layout() -> SpatialLayout {
+        SpatialLayout::new(vec![SpatialNeighbor {
+            machine_name: "peer".to_owned(),
+            position: RelativePosition::Left,
+        }])
+    }
+
+    #[test]
+    fn sticky_left_arms_at_negative_origin_edge() {
+        let screen = ScreenBounds {
+            origin_x: -1600,
+            origin_y: 0,
+            width: 3200,
+            height: 1080,
+        };
+        let layout = left_peer_layout();
+        let mut handoff = HandoffController::new("local");
+        let cursor = CursorPosition {
+            x: screen.origin_x,
+            y: 400,
+        };
+        let events = [InputEvent::MouseMove { dx: -4, dy: 0 }];
+        let mut began = false;
+        for _ in 0..5 {
+            if matches!(
+                handoff.on_local_cursor(cursor, screen, &layout, &events),
+                HandoffAction::Begin { .. }
+            ) {
+                began = true;
+                break;
+            }
+        }
+        assert!(began, "left sticky must arm at screen.origin_x");
+    }
+
+    #[test]
+    fn sticky_left_ignores_interior_when_origin_is_negative() {
+        let screen = ScreenBounds {
+            origin_x: -1600,
+            origin_y: 0,
+            width: 3200,
+            height: 1080,
+        };
+        let layout = left_peer_layout();
+        let mut handoff = HandoffController::new("local");
+        // x=-100 is inside the virtual desktop when origin is -1600; must not look like Left edge.
+        let cursor = CursorPosition { x: -100, y: 400 };
+        let events = [InputEvent::MouseMove { dx: -4, dy: 0 }];
+        for _ in 0..5 {
+            let action = handoff.on_local_cursor(cursor, screen, &layout, &events);
+            assert!(
+                !matches!(action, HandoffAction::Begin { .. }),
+                "interior point x=-100 must not sticky-begin Left when origin_x=-1600"
+            );
+        }
+    }
 }
