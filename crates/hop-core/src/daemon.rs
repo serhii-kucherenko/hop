@@ -357,7 +357,7 @@ async fn run_client(
                         }
                     }
                 }
-                _ = logi_return_ticker.tick(), if handoff_active && matches!(active_transport, HandoffTransport::Logi) => {
+                _ = logi_return_ticker.tick(), if client_should_poll_local_return(handoff_active, active_transport) => {
                     let cursor = match adapters.input_capture.poll_cursor_position() {
                         Ok(Some(cursor)) => cursor,
                         Ok(None) => continue,
@@ -384,11 +384,13 @@ async fn run_client(
                         continue;
                     }
 
-                    if let Err(error) = logi_handoff.switch_to_peer(&owner_machine) {
-                        eprintln!(
-                            "logi return switch failed for owner {}: {}",
-                            owner_machine, error
-                        );
+                    if matches!(active_transport, HandoffTransport::Logi) {
+                        if let Err(error) = logi_handoff.switch_to_peer(&owner_machine) {
+                            eprintln!(
+                                "logi return switch failed for owner {}: {}",
+                                owner_machine, error
+                            );
+                        }
                     }
 
                     let handoff_end = ControlMessage::HandoffEnd {
@@ -397,10 +399,11 @@ async fn run_client(
                     match send_control_message(&mut stream, &mut cipher, &handoff_end).await {
                         Ok(()) => {
                             handoff_active = false;
+                            let ended_transport = active_transport;
                             active_transport = HandoffTransport::Network;
                             return_edge_detector.reset();
                             println!(
-                                "handoff end sent from client on {:?} return edge (logi)",
+                                "handoff end sent from client on {:?} return edge ({ended_transport:?})",
                                 return_edge
                             );
                         }
@@ -427,7 +430,14 @@ async fn run_client(
                     let payload = &datagram_buffer[..len];
                     match decode_datagram(&mut cipher, payload) {
                         Ok(message) => {
-                            if !handoff_active || !matches!(active_transport, HandoffTransport::Network) {
+                            if !handoff_active {
+                                continue;
+                            }
+                            // Inject for Network ownership and for Logi BLE-reconnect overlap.
+                            if !matches!(
+                                active_transport,
+                                HandoffTransport::Network | HandoffTransport::Logi
+                            ) {
                                 continue;
                             }
 
@@ -753,9 +763,14 @@ async fn run_server_session(
                     }
                 }
 
+                // Network is the inject path; Logi also gets UDP overlap while Easy-Switch
+                // devices reconnect (BLE often 2–8s).
                 if handoff_committed
                     && matches!(handoff.focus_state(), FocusState::Remote { .. })
-                    && matches!(active_transport, HandoffTransport::Network)
+                    && matches!(
+                        active_transport,
+                        HandoffTransport::Network | HandoffTransport::Logi
+                    )
                 {
                     for event in pending_events {
                         let datagram = InputDatagram {
@@ -804,6 +819,15 @@ async fn run_server_session(
                     }
                     Ok(Some(ControlMessage::HandoffEnd { owner_machine })) => {
                         if owner_machine == config.local.machine_name {
+                            if matches!(active_transport, HandoffTransport::Logi) {
+                                if let Err(error) = logi_handoff.switch_back_local() {
+                                    eprintln!(
+                                        "logi switch back to local after remote return failed: {error}"
+                                    );
+                                } else {
+                                    println!("logi switch back to local after remote return");
+                                }
+                            }
                             recover_server_focus_local(
                                 &mut handoff,
                                 adapters.input_capture.as_mut(),
@@ -1124,6 +1148,11 @@ fn stop_requested(stop_signal_path: Option<&Path>) -> bool {
     stop_signal_path.map(|path| path.exists()).unwrap_or(false)
 }
 
+fn client_should_poll_local_return(handoff_active: bool, _transport: HandoffTransport) -> bool {
+    // Network return used to be UDP-only; local trackpad/mouse must also be able to release.
+    handoff_active
+}
+
 const STICKY_RETURN_DISTANCE_THRESHOLD: i32 = 6;
 
 struct ReturnEdgeDetector {
@@ -1417,6 +1446,26 @@ mod tests {
             },
             screen,
             &InputEvent::MouseMove { dx: -4, dy: 0 }
+        ));
+    }
+
+    #[test]
+    fn network_and_logi_handoff_enable_local_return_polling() {
+        assert!(
+            client_should_poll_local_return(true, HandoffTransport::Network),
+            "Network handoff must poll local cursor/trackpad for return edge (not UDP-only)"
+        );
+        assert!(client_should_poll_local_return(
+            true,
+            HandoffTransport::Logi
+        ));
+        assert!(!client_should_poll_local_return(
+            false,
+            HandoffTransport::Network
+        ));
+        assert!(!client_should_poll_local_return(
+            false,
+            HandoffTransport::Logi
         ));
     }
 

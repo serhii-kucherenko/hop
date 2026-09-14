@@ -177,7 +177,10 @@ impl LogiHandoff {
     }
 
     pub fn can_accept_logi_from(&self, owner_machine: &str) -> bool {
-        self.can_switch_to_peer(owner_machine)
+        // Accept Logi ownership when we know the owner's channel map.
+        // The *owner* performs ChangeHost on enter; the client may have no local HID++
+        // (common on macOS BLE) and still must ACK Logi so Easy-Switch can run on the server.
+        self.peer_host_map_for(owner_machine).is_some()
     }
 
     pub fn can_switch_to_peer(&self, peer_machine: &str) -> bool {
@@ -1628,5 +1631,45 @@ mod tests {
         // Even with a weak name match, local connected slot must stay unused.
         let chosen_bad_name = best_host_for_machine(&hosts, "unknown-peer", &used, Some(0));
         assert_eq!(chosen_bad_name, Some(1));
+    }
+
+    #[test]
+    fn mac_client_accepts_logi_when_maps_exist_without_local_hidpp() {
+        // Desk reality: Windows owns HID++ ChangeHost; Mac BLE has maps but no 0x1814.
+        let handoff = LogiHandoff {
+            requested_mode: HandoffMode::Auto,
+            local_machine_name: "hop-machine".to_owned(),
+            endpoint: None,
+            devices: Vec::new(),
+            hidpp_targets: Vec::new(),
+            peer_host_index: HashMap::new(),
+            peer_device_host_index: {
+                let mut peer = HashMap::new();
+                let mut kinds = HashMap::new();
+                kinds.insert("keyboard".to_owned(), 1);
+                kinds.insert("mouse".to_owned(), 2);
+                peer.insert("NUCBOX_M7PRO".to_owned(), kinds);
+                peer
+            },
+            local_host_index: None,
+            local_device_host_index: {
+                let mut local = HashMap::new();
+                local.insert("keyboard".to_owned(), 0);
+                local.insert("mouse".to_owned(), 0);
+                local
+            },
+            status_note: "network-fallback".to_owned(),
+            options_status: "options+ unavailable".to_owned(),
+            hidpp_status: "no hid++".to_owned(),
+        };
+        assert!(
+            handoff.can_accept_logi_from("NUCBOX_M7PRO"),
+            "Mac must ACK Logi handoff when peer maps exist even without local HID++"
+        );
+        assert!(
+            !handoff.can_switch_to_peer("NUCBOX_M7PRO"),
+            "Mac still cannot initiate Easy-Switch without HID++/Options+"
+        );
+        assert!(!handoff.can_accept_logi_from("unknown-owner"));
     }
 }
