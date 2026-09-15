@@ -23,7 +23,8 @@ use crate::clipboard::{ClipboardSync, CLIPBOARD_POLL_INTERVAL};
 use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
-    edge_for_peer_position, CursorPosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
+    cursor_on_containing_display_edge, edge_for_peer_position, CursorPosition, ScreenBounds,
+    SpatialLayout, SpatialNeighbor,
 };
 use crate::logi::LogiHandoff;
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
@@ -141,8 +142,12 @@ async fn run_client(
             config.local.screen_width,
             config.local.screen_height,
         ));
+    let return_displays = adapters
+        .screen_provider
+        .display_list()
+        .unwrap_or_else(|_| vec![local_screen]);
     let return_edge = edge_for_peer_position(peer.position);
-    let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
+    let mut return_edge_detector = ReturnEdgeDetector::with_displays(return_edge, return_displays);
     println!(
         "starting hop client; connecting control {} and listening data {}",
         peer.control_addr, config.local.data_bind
@@ -1158,13 +1163,15 @@ const STICKY_RETURN_DISTANCE_THRESHOLD: i32 = 6;
 struct ReturnEdgeDetector {
     edge: Edge,
     outbound_distance: i32,
+    displays: Vec<ScreenBounds>,
 }
 
 impl ReturnEdgeDetector {
-    fn new(edge: Edge) -> Self {
+    fn with_displays(edge: Edge, displays: Vec<ScreenBounds>) -> Self {
         Self {
             edge,
             outbound_distance: 0,
+            displays,
         }
     }
 
@@ -1188,7 +1195,12 @@ impl ReturnEdgeDetector {
             Edge::Top => i32::from((-*dy).max(0)),
             Edge::Bottom => i32::from((*dy).max(0)),
         };
-        if outbound == 0 || !cursor_is_on_edge(cursor, screen, self.edge) {
+        let on_edge = if self.displays.is_empty() {
+            cursor_is_on_edge(cursor, screen, self.edge)
+        } else {
+            cursor_on_containing_display_edge(cursor, &self.displays, self.edge)
+        };
+        if outbound == 0 || !on_edge {
             self.reset();
             return false;
         }
@@ -1406,7 +1418,7 @@ mod tests {
         ];
 
         for (edge, off_edge, on_edge, inbound, outbound) in scenarios {
-            let mut detector = ReturnEdgeDetector::new(edge);
+            let mut detector = ReturnEdgeDetector::with_displays(edge, Vec::new());
             assert!(!detector.should_release(off_edge, screen, &outbound));
             assert!(!detector.should_release(on_edge, screen, &inbound));
             assert!(!detector.should_release(on_edge, screen, &outbound));
@@ -1422,7 +1434,7 @@ mod tests {
             width: 3200,
             height: 1400,
         };
-        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        let mut detector = ReturnEdgeDetector::with_displays(Edge::Left, Vec::new());
         assert!(!detector.should_release(
             CursorPosition {
                 x: screen.origin_x + 5,
@@ -1447,6 +1459,32 @@ mod tests {
             screen,
             &InputEvent::MouseMove { dx: -4, dy: 0 }
         ));
+    }
+
+    #[test]
+    fn return_edge_fires_on_macbook_left_with_dell_to_the_left() {
+        let dell = ScreenBounds {
+            origin_x: -3440,
+            origin_y: -458,
+            width: 3440,
+            height: 1440,
+        };
+        let macbook = ScreenBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 1800,
+            height: 1169,
+        };
+        let union = ScreenBounds {
+            origin_x: -3440,
+            origin_y: -458,
+            width: 5240,
+            height: 1627,
+        };
+        let mut detector = ReturnEdgeDetector::with_displays(Edge::Left, vec![dell, macbook]);
+        let outbound = InputEvent::MouseMove { dx: -4, dy: 0 };
+        assert!(!detector.should_release(CursorPosition { x: 0, y: 500 }, union, &outbound));
+        assert!(detector.should_release(CursorPosition { x: 0, y: 500 }, union, &outbound));
     }
 
     #[test]
