@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,12 @@ use crate::logi::LogiHandoff;
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
 
 const STOPPED_MESSAGE: &str = "hop stopped; local input restored";
+
+fn flush_stdio() {
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
+}
+
 const MAX_CONTROL_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 pub async fn run(
@@ -143,10 +150,13 @@ async fn run_client(
         ));
     let return_edge = edge_for_peer_position(peer.position);
     let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
+    // Avoid losing handoff logs on abrupt exit (macOS often fully-buffers stdout when not a TTY).
+    flush_stdio();
     println!(
         "starting hop client; connecting control {} and listening data {}",
         peer.control_addr, config.local.data_bind
     );
+    flush_stdio();
 
     let udp_port = parse_port(&config.local.data_bind)?;
     let udp_socket = UdpSocket::bind(&config.local.data_bind)
@@ -303,7 +313,7 @@ async fn run_client(
                                 active_transport = transport;
                                 owner_machine = from_machine.clone();
                                 return_edge_detector.reset();
-                                let seed = seed_position_near_return_edge(return_edge, local_screen);
+                                let seed = seed_position_for_handoff_enter(local_screen);
                                 adapters.input_injector.seed_injected_cursor(seed);
                                 if let Err(error) = adapters.cursor_controller.warp_cursor_to(seed) {
                                     eprintln!("failed to warp cursor on handoff start: {error}");
@@ -312,6 +322,7 @@ async fn run_client(
                                     "handoff begin: from={} to={} edge={:?} transport={:?}",
                                     from_machine, to_machine, edge, transport
                                 );
+                                flush_stdio();
                             } else {
                                 handoff_active = false;
                                 active_transport = HandoffTransport::Network;
@@ -323,6 +334,7 @@ async fn run_client(
                                     edge,
                                     reason.unwrap_or_else(|| "unknown".to_owned())
                                 );
+                                flush_stdio();
                             }
                         }
                         ControlMessage::HandoffEnd { owner_machine } => {
@@ -330,6 +342,7 @@ async fn run_client(
                             active_transport = HandoffTransport::Network;
                             return_edge_detector.reset();
                             println!("handoff end: owner={owner_machine}; disabling client injection");
+                            flush_stdio();
                         }
                         ControlMessage::Ping { at_millis } => {
                             let pong = ControlMessage::Pong { at_millis };
@@ -410,6 +423,7 @@ async fn run_client(
                                 "handoff end sent from client on {:?} return edge ({ended_transport:?})",
                                 return_edge
                             );
+                            flush_stdio();
                         }
                         Err(error) => {
                             eprintln!("failed to send handoff end: {error}; reconnecting");
@@ -485,6 +499,7 @@ async fn run_client(
                                                 "handoff end sent from client on {:?} return edge",
                                                 return_edge
                                             );
+                                            flush_stdio();
                                             continue;
                                         }
                                         Err(error) => {
@@ -1206,6 +1221,9 @@ const STICKY_RETURN_DISTANCE_THRESHOLD: i32 = 6;
 struct ReturnEdgeDetector {
     edge: Edge,
     outbound_distance: i32,
+    /// After handoff enter the cursor may sit on the return edge; require an off-edge
+    /// sample first so we do not immediately thrash back to the peer.
+    armed: bool,
 }
 
 impl ReturnEdgeDetector {
@@ -1213,11 +1231,13 @@ impl ReturnEdgeDetector {
         Self {
             edge,
             outbound_distance: 0,
+            armed: false,
         }
     }
 
     fn reset(&mut self) {
         self.outbound_distance = 0;
+        self.armed = false;
     }
 
     fn should_release(
@@ -1239,8 +1259,17 @@ impl ReturnEdgeDetector {
         // Always use the virtual-desktop union edge (`screen`), not per-display edges.
         // Peer-facing return is the outer union boundary (e.g. Dell left at origin_x=-3440),
         // not MacBook's x=0 which is an interior boundary when another display sits to the left.
-        if outbound == 0 || !cursor_is_on_edge(cursor, screen, self.edge) {
-            self.reset();
+        let on_edge = cursor_is_on_edge(cursor, screen, self.edge);
+        if !on_edge {
+            self.armed = true;
+            self.outbound_distance = 0;
+            return false;
+        }
+        if !self.armed {
+            return false;
+        }
+        if outbound == 0 {
+            self.outbound_distance = 0;
             return false;
         }
 
@@ -1249,30 +1278,17 @@ impl ReturnEdgeDetector {
             return false;
         }
 
-        self.reset();
+        self.outbound_distance = 0;
         true
     }
 }
 
-fn seed_position_near_return_edge(edge: Edge, screen: ScreenBounds) -> CursorPosition {
-    const INSET: i32 = 80;
-    match edge {
-        Edge::Left => CursorPosition {
-            x: screen.origin_x + INSET,
-            y: screen.origin_y + (screen.height as i32) / 2,
-        },
-        Edge::Right => CursorPosition {
-            x: screen.max_x() - INSET,
-            y: screen.origin_y + (screen.height as i32) / 2,
-        },
-        Edge::Top => CursorPosition {
-            x: screen.origin_x + (screen.width as i32) / 2,
-            y: screen.origin_y + INSET,
-        },
-        Edge::Bottom => CursorPosition {
-            x: screen.origin_x + (screen.width as i32) / 2,
-            y: screen.max_y() - INSET,
-        },
+fn seed_position_for_handoff_enter(screen: ScreenBounds) -> CursorPosition {
+    // Seed in the interior of the usable virtual desktop (union center), not near the
+    // peer-facing return edge — otherwise enter can immediately re-trigger return.
+    CursorPosition {
+        x: screen.origin_x + (screen.width as i32) / 2,
+        y: screen.origin_y + (screen.height as i32) / 2,
     }
 }
 
@@ -1581,6 +1597,15 @@ mod tests {
             height: 1627,
         };
         let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        // Arm by leaving the edge after handoff enter.
+        assert!(!detector.should_release(
+            CursorPosition {
+                x: screen.origin_x + 80,
+                y: screen.origin_y + (screen.height as i32) / 2,
+            },
+            screen,
+            &InputEvent::MouseMove { dx: 1, dy: 0 }
+        ));
         // Just on the union left edge (interior boundary of the virtual desktop).
         let cursor = CursorPosition {
             x: screen.origin_x,
@@ -1601,6 +1626,55 @@ mod tests {
             screen,
             &InputEvent::MouseMove { dx: -2, dy: 0 }
         ));
+    }
+
+    #[test]
+    fn return_edge_requires_off_edge_after_handoff_before_firing() {
+        let screen = ScreenBounds {
+            origin_x: -3440,
+            origin_y: -458,
+            width: 5240,
+            height: 1627,
+        };
+        let on_edge = CursorPosition {
+            x: screen.origin_x,
+            y: 500,
+        };
+        let off_edge = CursorPosition {
+            x: screen.origin_x + 120,
+            y: 500,
+        };
+        let outbound = InputEvent::MouseMove { dx: -4, dy: 0 };
+
+        // Fresh detector after handoff: first on-edge outbound must NOT fire (unarmed).
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+
+        // After an off-edge sample, sticky on-edge outbound can fire.
+        assert!(!detector.should_release(off_edge, screen, &outbound));
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+        assert!(detector.should_release(on_edge, screen, &outbound));
+
+        // reset() disarms again (same as new handoff).
+        detector.reset();
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+        assert!(!detector.should_release(on_edge, screen, &outbound));
+    }
+
+    #[test]
+    fn seed_position_for_handoff_enter_is_union_center() {
+        let screen = ScreenBounds {
+            origin_x: -3440,
+            origin_y: -458,
+            width: 5240,
+            height: 1627,
+        };
+        let seed = seed_position_for_handoff_enter(screen);
+        assert_eq!(seed.x, screen.origin_x + (screen.width as i32) / 2);
+        assert_eq!(seed.y, screen.origin_y + (screen.height as i32) / 2);
+        assert!(!cursor_is_on_edge(seed, screen, Edge::Left));
     }
 
     #[test]
