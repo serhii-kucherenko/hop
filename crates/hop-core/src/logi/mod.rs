@@ -220,22 +220,31 @@ impl LogiHandoff {
         if host_by_kind.is_empty() {
             return false;
         }
-        let hidpp_ok = !self.hidpp_targets.is_empty()
-            && self.hidpp_targets.iter().all(|target| {
-                host_by_kind
-                    .get(&target.kind)
-                    .map(|index| *index < target.host_count)
-                    .unwrap_or(false)
+        // Every mapped kind (keyboard AND mouse on this desk) must be switchable.
+        // Previously we only checked discovered targets, so keyboard-only HID++
+        // still selected Logi and left the mouse behind on Windows.
+        let hidpp_covers = !self.hidpp_targets.is_empty()
+            && host_by_kind.keys().all(|kind| {
+                self.hidpp_targets.iter().any(|target| {
+                    target.kind == *kind
+                        && host_by_kind
+                            .get(kind)
+                            .map(|index| *index < target.host_count)
+                            .unwrap_or(false)
+                })
             });
-        let options_ok = self.endpoint.is_some()
+        let options_covers = self.endpoint.is_some()
             && !self.devices.is_empty()
-            && self.devices.iter().all(|device| {
-                host_by_kind
-                    .get(&device.kind)
-                    .map(|index| device.hosts.iter().any(|host| host.index == *index))
-                    .unwrap_or(false)
+            && host_by_kind.keys().all(|kind| {
+                self.devices.iter().any(|device| {
+                    device.kind == *kind
+                        && host_by_kind
+                            .get(kind)
+                            .map(|index| device.hosts.iter().any(|host| host.index == *index))
+                            .unwrap_or(false)
+                })
             });
-        hidpp_ok || options_ok
+        hidpp_covers || options_covers
     }
 
     fn logi_path_ready(&self) -> bool {
@@ -1490,17 +1499,30 @@ mod tests {
                 ],
                 current_host: Some(0),
             }],
-            hidpp_targets: vec![hidpp::HidppTarget {
-                path: b"/dev/hidraw0".to_vec(),
-                name: "MX Mouse".to_owned(),
-                kind: LogiDeviceKind::Mouse,
-                product_id: 0x1234,
-                device_index: 0xFF,
-                report_id: hidpp::REPORT_SHORT,
-                feature_index: 0x0D,
-                host_count: 2,
-                current_host: 0,
-            }],
+            hidpp_targets: vec![
+                hidpp::HidppTarget {
+                    path: b"/dev/hidraw0".to_vec(),
+                    name: "MX Mouse".to_owned(),
+                    kind: LogiDeviceKind::Mouse,
+                    product_id: 0x1234,
+                    device_index: 0xFF,
+                    report_id: hidpp::REPORT_SHORT,
+                    feature_index: 0x0D,
+                    host_count: 2,
+                    current_host: 0,
+                },
+                hidpp::HidppTarget {
+                    path: b"/dev/hidraw1".to_vec(),
+                    name: "Casa Keys".to_owned(),
+                    kind: LogiDeviceKind::Keyboard,
+                    product_id: 0x5678,
+                    device_index: 0xFF,
+                    report_id: hidpp::REPORT_SHORT,
+                    feature_index: 0x0D,
+                    host_count: 2,
+                    current_host: 0,
+                },
+            ],
             peer_host_index: {
                 let mut map = HashMap::new();
                 map.insert("macbook-pro".to_owned(), 1);
@@ -1671,5 +1693,48 @@ mod tests {
             "Mac still cannot initiate Easy-Switch without HID++/Options+"
         );
         assert!(!handoff.can_accept_logi_from("unknown-owner"));
+    }
+
+    #[test]
+    fn logi_transport_requires_mouse_and_keyboard_targets() {
+        let handoff = LogiHandoff {
+            requested_mode: HandoffMode::Auto,
+            local_machine_name: "windows-desktop".to_owned(),
+            endpoint: None,
+            devices: Vec::new(),
+            hidpp_targets: vec![hidpp::HidppTarget {
+                path: b"/dev/hidraw0".to_vec(),
+                name: "Casa Keys".to_owned(),
+                kind: LogiDeviceKind::Keyboard,
+                product_id: 0x1111,
+                device_index: 0xFF,
+                report_id: hidpp::REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 1,
+            }],
+            peer_host_index: HashMap::new(),
+            peer_device_host_index: {
+                let mut peer = HashMap::new();
+                let mut kinds = HashMap::new();
+                kinds.insert("keyboard".to_owned(), 0);
+                kinds.insert("mouse".to_owned(), 0);
+                peer.insert("hop-machine".to_owned(), kinds);
+                peer
+            },
+            local_host_index: None,
+            local_device_host_index: HashMap::new(),
+            status_note: "kbd only".to_owned(),
+            options_status: "n/a".to_owned(),
+            hidpp_status: "kbd only".to_owned(),
+        };
+        assert!(
+            !handoff.can_switch_to_peer("hop-machine"),
+            "keyboard-only HID++ must not claim full Logi switch when mouse is mapped"
+        );
+        assert_eq!(
+            handoff.preferred_transport_for_peer("hop-machine"),
+            HandoffTransport::Network
+        );
     }
 }

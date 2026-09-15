@@ -640,10 +640,24 @@ async fn run_server_session(
                         if matches!(requested_transport, HandoffTransport::Logi) {
                             let mut fallback_reason = None;
                             if matches!(ack_status, HandoffStartAckStatus::Accepted) {
-                                if let Err(error) = logi_handoff.switch_to_peer(&target_machine) {
-                                    fallback_reason = Some(format!(
-                                        "logi switch failed: {error}; retrying with network transport"
-                                    ));
+                                let peer = target_machine.clone();
+                                let switch_result = tokio::task::spawn_blocking({
+                                    let logi = logi_handoff.clone();
+                                    move || logi.switch_to_peer(&peer)
+                                })
+                                .await;
+                                match switch_result {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => {
+                                        fallback_reason = Some(format!(
+                                            "logi switch failed: {error}; retrying with network transport"
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        fallback_reason = Some(format!(
+                                            "logi switch join failed: {error}; retrying with network transport"
+                                        ));
+                                    }
                                 }
                             } else {
                                 fallback_reason = Some(format!(
@@ -825,12 +839,21 @@ async fn run_server_session(
                     Ok(Some(ControlMessage::HandoffEnd { owner_machine })) => {
                         if owner_machine == config.local.machine_name {
                             if matches!(active_transport, HandoffTransport::Logi) {
-                                if let Err(error) = logi_handoff.switch_back_local() {
-                                    eprintln!(
+                                let switch_result = tokio::task::spawn_blocking({
+                                    let logi = logi_handoff.clone();
+                                    move || logi.switch_back_local()
+                                })
+                                .await;
+                                match switch_result {
+                                    Ok(Ok(())) => {
+                                        println!("logi switch back to local after remote return")
+                                    }
+                                    Ok(Err(error)) => eprintln!(
                                         "logi switch back to local after remote return failed: {error}"
-                                    );
-                                } else {
-                                    println!("logi switch back to local after remote return");
+                                    ),
+                                    Err(error) => eprintln!(
+                                        "logi switch back join failed after remote return: {error}"
+                                    ),
                                 }
                             }
                             recover_server_focus_local(
@@ -872,6 +895,24 @@ async fn run_server_session(
                     Ok(Some(other)) => println!("control message: {other:?}"),
                     Ok(None) => {}
                     Err(error) => {
+                        if matches!(active_transport, HandoffTransport::Logi) {
+                            let switch_result = tokio::task::spawn_blocking({
+                                let logi = logi_handoff.clone();
+                                move || logi.switch_back_local()
+                            })
+                            .await;
+                            match switch_result {
+                                Ok(Ok(())) => {
+                                    println!("logi switch back to local after control disconnect")
+                                }
+                                Ok(Err(switch_error)) => eprintln!(
+                                    "logi switch back after disconnect failed: {switch_error}"
+                                ),
+                                Err(join_error) => eprintln!(
+                                    "logi switch back join failed after disconnect: {join_error}"
+                                ),
+                            }
+                        }
                         recover_server_focus_local(
                             &mut handoff,
                             adapters.input_capture.as_mut(),
