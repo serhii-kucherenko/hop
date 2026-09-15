@@ -158,16 +158,19 @@ fn discover_inner() -> Result<Vec<HidppTarget>> {
         let Ok(device) = api.open_path(info.path()) else {
             continue;
         };
-        if let Some((dev_idx, report_id, feat_idx)) = probe_change_host(&device) {
+        // Unifying/Bolt receivers expose multiple paired devices on one HID path.
+        // Probe every device index so mouse + keyboard are both discovered.
+        let base_name = info
+            .product_string()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Logitech {:04x}", info.product_id()));
+        for (dev_idx, report_id, feat_idx) in probe_all_change_host(&device) {
             let (host_count, current_host) =
                 read_host_info(&device, report_id, dev_idx, feat_idx).unwrap_or((3, 0));
-            let name = info
-                .product_string()
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Logitech {:04x}", info.product_id()));
+            let name = format!("{base_name}#{dev_idx}");
             found.push(HidppTarget {
-                path: path_bytes,
+                path: path_bytes.clone(),
                 name: name.clone(),
                 kind: infer_kind(info.usage_page(), info.usage(), &name),
                 product_id: info.product_id(),
@@ -181,7 +184,53 @@ fn discover_inner() -> Result<Vec<HidppTarget>> {
         drop(device);
     }
 
+    assign_kinds_for_receiver_slots(&mut found);
     Ok(dedupe_by_kind(found))
+}
+
+/// Receivers often expose paired devices as generic "USB Receiver#N" with kind Other.
+/// Map distinct device indices on the same path to keyboard/mouse so per-kind maps work.
+fn assign_kinds_for_receiver_slots(targets: &mut [HidppTarget]) {
+    use std::collections::HashMap;
+    let mut by_path: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    for (index, target) in targets.iter().enumerate() {
+        by_path.entry(target.path.clone()).or_default().push(index);
+    }
+    for indices in by_path.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let mut ordered = indices.clone();
+        ordered.sort_by_key(|i| targets[*i].device_index);
+        let all_other = ordered
+            .iter()
+            .all(|&i| matches!(targets[i].kind, LogiDeviceKind::Other));
+        if !all_other {
+            continue;
+        }
+        if let Some(&first) = ordered.first() {
+            targets[first].kind = LogiDeviceKind::Keyboard;
+            if targets[first].name.contains('#') {
+                targets[first].name = format!(
+                    "Keyboard{}",
+                    &targets[first].name[targets[first].name.find('#').unwrap()..]
+                );
+            } else {
+                targets[first].name = format!("Keyboard#{}", targets[first].device_index);
+            }
+        }
+        if let Some(&second) = ordered.get(1) {
+            targets[second].kind = LogiDeviceKind::Mouse;
+            if targets[second].name.contains('#') {
+                targets[second].name = format!(
+                    "Mouse{}",
+                    &targets[second].name[targets[second].name.find('#').unwrap()..]
+                );
+            } else {
+                targets[second].name = format!("Mouse#{}", targets[second].device_index);
+            }
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -270,20 +319,25 @@ fn switch_targets_with_map_native(
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn probe_change_host(device: &hidapi::HidDevice) -> Option<(u8, u8, u8)> {
+fn probe_all_change_host(device: &hidapi::HidDevice) -> Vec<(u8, u8, u8)> {
     let params = get_feature_params(FEAT_CHANGE_HOST);
+    let mut found = Vec::new();
+    let mut seen_idx = std::collections::HashSet::new();
     for &dev_idx in &DEVICE_INDICES {
         for &report_id in &[REPORT_LONG, REPORT_SHORT] {
             if let Some(reply) =
                 hidpp_request(device, report_id, dev_idx, ROOT_FEATURE, 0, &params, 250)
             {
                 if let Some(feature_index) = parse_get_feature_index(&reply) {
-                    return Some((dev_idx, report_id, feature_index));
+                    if seen_idx.insert(dev_idx) {
+                        found.push((dev_idx, report_id, feature_index));
+                    }
+                    break;
                 }
             }
         }
     }
-    None
+    found
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -416,11 +470,15 @@ pub fn parse_get_feature_index(reply: &[u8]) -> Option<u8> {
 pub fn device_rank(usage_page: u16, usage: u16, name: &str) -> u8 {
     let lower = name.to_ascii_lowercase();
     let mouse = (usage_page == 0x0001 && usage == 0x0002)
-        || ["master", "anywhere", "mouse", "ergo"]
+        || [
+            "master", "anywhere", "mouse", "ergo", "mchncl", "vertical", "mx m",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
+    let kbd = (usage_page == 0x0001 && usage == 0x0006)
+        || ["keys", "keyboard", "casa"]
             .iter()
             .any(|w| lower.contains(w));
-    let kbd = (usage_page == 0x0001 && usage == 0x0006)
-        || ["keys", "keyboard"].iter().any(|w| lower.contains(w));
     let tier = if kbd && !mouse {
         2
     } else if mouse {
@@ -436,14 +494,18 @@ pub fn device_rank(usage_page: u16, usage: u16, name: &str) -> u8 {
 fn infer_kind(usage_page: u16, usage: u16, name: &str) -> LogiDeviceKind {
     let lower = name.to_ascii_lowercase();
     if (usage_page == 0x0001 && usage == 0x0002)
-        || ["master", "anywhere", "mouse", "ergo"]
-            .iter()
-            .any(|w| lower.contains(w))
+        || [
+            "master", "anywhere", "mouse", "ergo", "mchncl", "vertical", "mx m",
+        ]
+        .iter()
+        .any(|w| lower.contains(w))
     {
         return LogiDeviceKind::Mouse;
     }
     if (usage_page == 0x0001 && usage == 0x0006)
-        || ["keys", "keyboard"].iter().any(|w| lower.contains(w))
+        || ["keys", "keyboard", "casa"]
+            .iter()
+            .any(|w| lower.contains(w))
     {
         return LogiDeviceKind::Keyboard;
     }
@@ -494,5 +556,36 @@ mod tests {
         let mouse_generic = device_rank(0x0001, 0x0002, "MX Master 3S");
         assert!(mouse_vendor < kbd_vendor);
         assert!(mouse_vendor < mouse_generic);
+    }
+
+    #[test]
+    fn assign_kinds_maps_receiver_slots_to_keyboard_and_mouse() {
+        let mut targets = vec![
+            HidppTarget {
+                path: b"receiver".to_vec(),
+                name: "USB Receiver#1".to_owned(),
+                kind: LogiDeviceKind::Other,
+                product_id: 0xc52b,
+                device_index: 1,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 1,
+            },
+            HidppTarget {
+                path: b"receiver".to_vec(),
+                name: "USB Receiver#2".to_owned(),
+                kind: LogiDeviceKind::Other,
+                product_id: 0xc52b,
+                device_index: 2,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 2,
+            },
+        ];
+        assign_kinds_for_receiver_slots(&mut targets);
+        assert_eq!(targets[0].kind, LogiDeviceKind::Keyboard);
+        assert_eq!(targets[1].kind, LogiDeviceKind::Mouse);
     }
 }

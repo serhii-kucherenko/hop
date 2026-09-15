@@ -438,6 +438,10 @@ impl ScreenInfoProvider for MacosScreenProvider {
     fn screen_bounds(&self) -> Result<ScreenBounds> {
         Ok(detect_display_union_bounds())
     }
+
+    fn display_list(&self) -> Result<Vec<ScreenBounds>> {
+        Ok(detect_display_list())
+    }
 }
 
 #[derive(Debug)]
@@ -522,6 +526,37 @@ fn display_backing_scale() -> (f64, f64) {
     let scale_x = display.pixels_wide() as f64 / width;
     let scale_y = display.pixels_high() as f64 / height;
     (scale_x.max(1.0), scale_y.max(1.0))
+}
+
+fn detect_display_list() -> Vec<ScreenBounds> {
+    let display_ids = CGDisplay::active_displays()
+        .ok()
+        .filter(|displays| !displays.is_empty());
+    let displays = display_ids
+        .map(|display_ids| {
+            display_ids
+                .into_iter()
+                .map(CGDisplay::new)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![CGDisplay::main()]);
+    if displays.is_empty() {
+        return vec![ScreenBounds::from_size(1, 1)];
+    }
+    displays
+        .into_iter()
+        .map(|display| {
+            let bounds = display.bounds();
+            let width = bounds.size.width.max(1.0).round() as u32;
+            let height = bounds.size.height.max(1.0).round() as u32;
+            ScreenBounds {
+                origin_x: bounds.origin.x.round() as i32,
+                origin_y: bounds.origin.y.round() as i32,
+                width,
+                height,
+            }
+        })
+        .collect()
 }
 
 fn detect_display_union_bounds() -> ScreenBounds {

@@ -18,6 +18,11 @@ pub trait RemoteInputInjector: Send {
 
 pub trait ScreenInfoProvider: Send + Sync {
     fn screen_bounds(&self) -> Result<ScreenBounds>;
+
+    /// Individual display rectangles in global coordinates (origin may be negative).
+    fn display_list(&self) -> Result<Vec<ScreenBounds>> {
+        Ok(vec![self.screen_bounds()?])
+    }
 }
 
 pub trait CursorController: Send {
