@@ -271,7 +271,12 @@ impl LogiHandoff {
         let selected_transport = match self.requested_mode {
             HandoffMode::Network => "network".to_owned(),
             HandoffMode::Auto => {
-                if self.logi_path_ready() && self.has_any_peer_mapping() {
+                let logi_peers_ready = self
+                    .peer_device_host_index
+                    .keys()
+                    .chain(self.peer_host_index.keys())
+                    .any(|peer| self.can_switch_to_peer(peer));
+                if logi_peers_ready {
                     if !self.hidpp_targets.is_empty() {
                         "auto(hidpp-first)".to_owned()
                     } else {
