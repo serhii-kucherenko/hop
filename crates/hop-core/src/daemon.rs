@@ -23,8 +23,7 @@ use crate::clipboard::{ClipboardSync, CLIPBOARD_POLL_INTERVAL};
 use crate::config::Config;
 use crate::handoff::{FocusState, HandoffAction, HandoffController};
 use crate::layout::{
-    cursor_on_containing_display_edge, edge_for_peer_position, CursorPosition, ScreenBounds,
-    SpatialLayout, SpatialNeighbor,
+    edge_for_peer_position, CursorPosition, ScreenBounds, SpatialLayout, SpatialNeighbor,
 };
 use crate::logi::LogiHandoff;
 use crate::platform::{build_platform_adapters, CursorController, LocalInputCapture};
@@ -142,12 +141,8 @@ async fn run_client(
             config.local.screen_width,
             config.local.screen_height,
         ));
-    let return_displays = adapters
-        .screen_provider
-        .display_list()
-        .unwrap_or_else(|_| vec![local_screen]);
     let return_edge = edge_for_peer_position(peer.position);
-    let mut return_edge_detector = ReturnEdgeDetector::with_displays(return_edge, return_displays);
+    let mut return_edge_detector = ReturnEdgeDetector::new(return_edge);
     println!(
         "starting hop client; connecting control {} and listening data {}",
         peer.control_addr, config.local.data_bind
@@ -308,6 +303,11 @@ async fn run_client(
                                 active_transport = transport;
                                 owner_machine = from_machine.clone();
                                 return_edge_detector.reset();
+                                let seed = seed_position_near_return_edge(return_edge, local_screen);
+                                adapters.input_injector.seed_injected_cursor(seed);
+                                if let Err(error) = adapters.cursor_controller.warp_cursor_to(seed) {
+                                    eprintln!("failed to warp cursor on handoff start: {error}");
+                                }
                                 println!(
                                     "handoff begin: from={} to={} edge={:?} transport={:?}",
                                     from_machine, to_machine, edge, transport
@@ -363,13 +363,12 @@ async fn run_client(
                     }
                 }
                 _ = logi_return_ticker.tick(), if client_should_poll_local_return(handoff_active, active_transport) => {
-                    let cursor = match adapters.input_capture.poll_cursor_position() {
-                        Ok(Some(cursor)) => cursor,
-                        Ok(None) => continue,
-                        Err(error) => {
-                            eprintln!("failed to poll cursor for logi return edge: {error}");
-                            continue;
-                        }
+                    let cursor = match resolve_client_return_cursor(
+                        adapters.input_injector.as_ref(),
+                        adapters.input_capture.as_mut(),
+                    ) {
+                        Some(cursor) => cursor,
+                        None => continue,
                     };
                     let events = match adapters.input_capture.poll_input_events() {
                         Ok(events) => events,
@@ -446,14 +445,34 @@ async fn run_client(
                                 continue;
                             }
 
-                            match adapters.input_capture.poll_cursor_position() {
-                                Ok(Some(cursor))
-                                    if return_edge_detector.should_release(
-                                        cursor,
-                                        local_screen,
-                                        &message.event,
-                                    ) =>
-                                {
+                            let pre_cursor = resolve_client_return_cursor(
+                                adapters.input_injector.as_ref(),
+                                adapters.input_capture.as_mut(),
+                            );
+
+                            latency_tracker.observe(message.sent_at_micros);
+                            match catch_unwind(AssertUnwindSafe(|| {
+                                adapters.input_injector.inject_event(&message.event)
+                            })) {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    eprintln!("input injection failed; continuing: {error}");
+                                }
+                                Err(_) => {
+                                    eprintln!("input injection panicked; continuing client loop");
+                                }
+                            }
+
+                            let post_cursor = adapters
+                                .input_injector
+                                .injected_cursor_position()
+                                .or(pre_cursor);
+                            if let Some(cursor) = post_cursor {
+                                if return_edge_detector.should_release(
+                                    cursor,
+                                    local_screen,
+                                    &message.event,
+                                ) {
                                     let handoff_end = ControlMessage::HandoffEnd {
                                         owner_machine: owner_machine.clone(),
                                     };
@@ -476,23 +495,6 @@ async fn run_client(
                                             continue;
                                         }
                                     }
-                                }
-                                Ok(Some(_)) | Ok(None) => {}
-                                Err(error) => {
-                                    eprintln!("failed to poll cursor for return edge: {error}");
-                                }
-                            }
-
-                            latency_tracker.observe(message.sent_at_micros);
-                            match catch_unwind(AssertUnwindSafe(|| {
-                                adapters.input_injector.inject_event(&message.event)
-                            })) {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => {
-                                    eprintln!("input injection failed; continuing: {error}");
-                                }
-                                Err(_) => {
-                                    eprintln!("input injection panicked; continuing client loop");
                                 }
                             }
                         }
@@ -1204,15 +1206,13 @@ const STICKY_RETURN_DISTANCE_THRESHOLD: i32 = 6;
 struct ReturnEdgeDetector {
     edge: Edge,
     outbound_distance: i32,
-    displays: Vec<ScreenBounds>,
 }
 
 impl ReturnEdgeDetector {
-    fn with_displays(edge: Edge, displays: Vec<ScreenBounds>) -> Self {
+    fn new(edge: Edge) -> Self {
         Self {
             edge,
             outbound_distance: 0,
-            displays,
         }
     }
 
@@ -1236,12 +1236,10 @@ impl ReturnEdgeDetector {
             Edge::Top => i32::from((-*dy).max(0)),
             Edge::Bottom => i32::from((*dy).max(0)),
         };
-        let on_edge = if self.displays.is_empty() {
-            cursor_is_on_edge(cursor, screen, self.edge)
-        } else {
-            cursor_on_containing_display_edge(cursor, &self.displays, self.edge)
-        };
-        if outbound == 0 || !on_edge {
+        // Always use the virtual-desktop union edge (`screen`), not per-display edges.
+        // Peer-facing return is the outer union boundary (e.g. Dell left at origin_x=-3440),
+        // not MacBook's x=0 which is an interior boundary when another display sits to the left.
+        if outbound == 0 || !cursor_is_on_edge(cursor, screen, self.edge) {
             self.reset();
             return false;
         }
@@ -1253,6 +1251,44 @@ impl ReturnEdgeDetector {
 
         self.reset();
         true
+    }
+}
+
+fn seed_position_near_return_edge(edge: Edge, screen: ScreenBounds) -> CursorPosition {
+    const INSET: i32 = 80;
+    match edge {
+        Edge::Left => CursorPosition {
+            x: screen.origin_x + INSET,
+            y: screen.origin_y + (screen.height as i32) / 2,
+        },
+        Edge::Right => CursorPosition {
+            x: screen.max_x() - INSET,
+            y: screen.origin_y + (screen.height as i32) / 2,
+        },
+        Edge::Top => CursorPosition {
+            x: screen.origin_x + (screen.width as i32) / 2,
+            y: screen.origin_y + INSET,
+        },
+        Edge::Bottom => CursorPosition {
+            x: screen.origin_x + (screen.width as i32) / 2,
+            y: screen.max_y() - INSET,
+        },
+    }
+}
+
+fn resolve_client_return_cursor(
+    injector: &dyn crate::platform::RemoteInputInjector,
+    capture: &mut dyn LocalInputCapture,
+) -> Option<CursorPosition> {
+    if let Some(cursor) = injector.injected_cursor_position() {
+        return Some(cursor);
+    }
+    match capture.poll_cursor_position() {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            eprintln!("failed to poll cursor for return edge: {error}");
+            None
+        }
     }
 }
 
@@ -1459,7 +1495,7 @@ mod tests {
         ];
 
         for (edge, off_edge, on_edge, inbound, outbound) in scenarios {
-            let mut detector = ReturnEdgeDetector::with_displays(edge, Vec::new());
+            let mut detector = ReturnEdgeDetector::new(edge);
             assert!(!detector.should_release(off_edge, screen, &outbound));
             assert!(!detector.should_release(on_edge, screen, &inbound));
             assert!(!detector.should_release(on_edge, screen, &outbound));
@@ -1475,7 +1511,7 @@ mod tests {
             width: 3200,
             height: 1400,
         };
-        let mut detector = ReturnEdgeDetector::with_displays(Edge::Left, Vec::new());
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
         assert!(!detector.should_release(
             CursorPosition {
                 x: screen.origin_x + 5,
@@ -1504,28 +1540,67 @@ mod tests {
 
     #[test]
     fn return_edge_fires_on_macbook_left_with_dell_to_the_left() {
-        let dell = ScreenBounds {
-            origin_x: -3440,
-            origin_y: -458,
-            width: 3440,
-            height: 1440,
-        };
-        let macbook = ScreenBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1800,
-            height: 1169,
-        };
+        // Peer-facing outer edge is the union left (-3440), not MacBook's x=0.
+        // With Dell left of MacBook, macOS never sticky-pushes at x=0 (cursor enters Dell).
         let union = ScreenBounds {
             origin_x: -3440,
             origin_y: -458,
             width: 5240,
             height: 1627,
         };
-        let mut detector = ReturnEdgeDetector::with_displays(Edge::Left, vec![dell, macbook]);
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
         let outbound = InputEvent::MouseMove { dx: -4, dy: 0 };
+        // Interior MacBook left (x=0) must NOT fire return.
         assert!(!detector.should_release(CursorPosition { x: 0, y: 500 }, union, &outbound));
-        assert!(detector.should_release(CursorPosition { x: 0, y: 500 }, union, &outbound));
+        assert!(!detector.should_release(CursorPosition { x: 0, y: 500 }, union, &outbound));
+        // Union outer left fires after sticky threshold.
+        assert!(!detector.should_release(
+            CursorPosition {
+                x: union.origin_x,
+                y: 500
+            },
+            union,
+            &outbound
+        ));
+        assert!(detector.should_release(
+            CursorPosition {
+                x: union.origin_x,
+                y: 500
+            },
+            union,
+            &outbound
+        ));
+    }
+
+    #[test]
+    fn return_edge_accumulates_outbound_from_just_inside_union_left() {
+        let screen = ScreenBounds {
+            origin_x: -3440,
+            origin_y: -458,
+            width: 5240,
+            height: 1627,
+        };
+        let mut detector = ReturnEdgeDetector::new(Edge::Left);
+        // Just on the union left edge (interior boundary of the virtual desktop).
+        let cursor = CursorPosition {
+            x: screen.origin_x,
+            y: screen.origin_y + (screen.height as i32) / 2,
+        };
+        assert!(!detector.should_release(
+            cursor,
+            screen,
+            &InputEvent::MouseMove { dx: -3, dy: 0 }
+        ));
+        assert!(!detector.should_release(
+            cursor,
+            screen,
+            &InputEvent::MouseMove { dx: -2, dy: 0 }
+        ));
+        assert!(detector.should_release(
+            cursor,
+            screen,
+            &InputEvent::MouseMove { dx: -2, dy: 0 }
+        ));
     }
 
     #[test]

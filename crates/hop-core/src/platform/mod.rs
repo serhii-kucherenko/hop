@@ -14,6 +14,12 @@ pub trait LocalInputCapture: Send {
 pub trait RemoteInputInjector: Send {
     fn inject_event(&mut self, event: &InputEvent) -> Result<()>;
     fn set_swap_ctrl_cmd(&mut self, _enabled: bool) {}
+    /// Cursor position tracked by the injector (e.g. macOS virtual cursor during Network ownership).
+    fn injected_cursor_position(&self) -> Option<crate::layout::CursorPosition> {
+        None
+    }
+    /// Seed the injector cursor near a known point (e.g. peer-facing edge on handoff start).
+    fn seed_injected_cursor(&mut self, _position: crate::layout::CursorPosition) {}
 }
 
 pub trait ScreenInfoProvider: Send + Sync {
@@ -33,6 +39,9 @@ pub trait CursorController: Send {
         edge: hop_protocol::control::Edge,
         screen: ScreenBounds,
     ) -> Result<()>;
+    fn warp_cursor_to(&mut self, _position: CursorPosition) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

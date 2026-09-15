@@ -298,6 +298,17 @@ impl RemoteInputInjector for MacosInputInjector {
         self.swap_ctrl_cmd = enabled;
     }
 
+    fn injected_cursor_position(&self) -> Option<CursorPosition> {
+        self.virtual_cursor.map(point_to_cursor)
+    }
+
+    fn seed_injected_cursor(&mut self, position: CursorPosition) {
+        let point = CGPoint::new(f64::from(position.x), f64::from(position.y));
+        self.virtual_cursor = Some(point);
+        self.last_move_at = Some(Instant::now());
+        let _ = CGDisplay::warp_mouse_cursor_position(point);
+    }
+
     fn inject_event(&mut self, event: &InputEvent) -> Result<()> {
         match event {
             InputEvent::MouseMove { dx, dy } => {
@@ -501,6 +512,15 @@ impl CursorController for MacosCursorController {
         };
         CGDisplay::warp_mouse_cursor_position(CGPoint::new(target.x as f64, target.y as f64))
             .map_err(|code| anyhow!("CGWarpMouseCursorPosition failed with code {code}"))?;
+        Ok(())
+    }
+
+    fn warp_cursor_to(&mut self, position: CursorPosition) -> Result<()> {
+        CGDisplay::warp_mouse_cursor_position(CGPoint::new(
+            f64::from(position.x),
+            f64::from(position.y),
+        ))
+        .map_err(|code| anyhow!("CGWarpMouseCursorPosition failed with code {code}"))?;
         Ok(())
     }
 }
