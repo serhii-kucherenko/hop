@@ -17,6 +17,8 @@ use crate::layout::ScreenBounds;
 
 mod hidpp;
 
+pub use hidpp::dump_hidpp_discovery;
+
 const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(180);
 const IPC_IO_TIMEOUT: Duration = Duration::from_millis(180);
 const MAX_AGENT_PACKET_BYTES: usize = 4 * 1024 * 1024;

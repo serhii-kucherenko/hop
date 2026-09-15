@@ -172,7 +172,7 @@ fn discover_inner() -> Result<Vec<HidppTarget>> {
             found.push(HidppTarget {
                 path: path_bytes.clone(),
                 name: name.clone(),
-                kind: infer_kind(info.usage_page(), info.usage(), &name),
+                kind: infer_kind(info.usage_page(), info.usage(), &name, info.product_id()),
                 product_id: info.product_id(),
                 device_index: dev_idx,
                 report_id,
@@ -190,6 +190,7 @@ fn discover_inner() -> Result<Vec<HidppTarget>> {
 
 /// Receivers often expose paired devices as generic "USB Receiver#N" with kind Other.
 /// Map distinct device indices on the same path to keyboard/mouse so per-kind maps work.
+#[allow(dead_code)]
 fn assign_kinds_for_receiver_slots(targets: &mut [HidppTarget]) {
     use std::collections::HashMap;
     let mut by_path: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
@@ -233,7 +234,12 @@ fn assign_kinds_for_receiver_slots(targets: &mut [HidppTarget]) {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[allow(dead_code)]
+/// Keep at most one Mouse and one Keyboard ChangeHost target.
+///
+/// BLE mice often probe as `Other` (empty product string). Previously any
+/// `Other` targets were dropped whenever a keyboard existed, which left Auto
+/// mode on network-fallback even though the mouse spoke 0x1814.
 fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
     let mut mouse = None;
     let mut keyboard = None;
@@ -246,6 +252,49 @@ fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
             LogiDeviceKind::Other => others.push(target),
         }
     }
+
+    // Promote Other hits into missing slots via PID / name heuristics.
+    let mut leftover = Vec::new();
+    for mut other in others {
+        let inferred = kind_from_product_id(other.product_id)
+            .unwrap_or_else(|| infer_kind_from_name(&other.name));
+        match inferred {
+            LogiDeviceKind::Mouse if mouse.is_none() => {
+                other.kind = LogiDeviceKind::Mouse;
+                mouse = Some(other);
+            }
+            LogiDeviceKind::Keyboard if keyboard.is_none() => {
+                other.kind = LogiDeviceKind::Keyboard;
+                keyboard = Some(other);
+            }
+            _ => leftover.push(other),
+        }
+    }
+
+    // Still missing a slot and multiple Other paths remain: assign by path order
+    // so split BLE keyboard+mouse desks keep one of each.
+    if (mouse.is_none() || keyboard.is_none()) && !leftover.is_empty() {
+        leftover.sort_by(|a, b| a.path.cmp(&b.path).then(a.device_index.cmp(&b.device_index)));
+        // Prefer distinct HID paths when promoting the second device.
+        let mouse_path = mouse.as_ref().map(|t| t.path.clone());
+        let keyboard_path = keyboard.as_ref().map(|t| t.path.clone());
+        let mut still = Vec::new();
+        for mut other in leftover {
+            let same_as_mouse = mouse_path.as_ref() == Some(&other.path);
+            let same_as_keyboard = keyboard_path.as_ref() == Some(&other.path);
+            if mouse.is_none() && !same_as_keyboard {
+                other.kind = LogiDeviceKind::Mouse;
+                mouse = Some(other);
+            } else if keyboard.is_none() && !same_as_mouse {
+                other.kind = LogiDeviceKind::Keyboard;
+                keyboard = Some(other);
+            } else {
+                still.push(other);
+            }
+        }
+        leftover = still;
+    }
+
     let mut out = Vec::new();
     if let Some(mouse) = mouse {
         out.push(mouse);
@@ -254,7 +303,17 @@ fn dedupe_by_kind(mut targets: Vec<HidppTarget>) -> Vec<HidppTarget> {
         out.push(keyboard);
     }
     if out.is_empty() {
-        out.extend(others);
+        // No typed devices — keep up to two Other targets on distinct paths.
+        leftover.sort_by(|a, b| a.path.cmp(&b.path).then(a.device_index.cmp(&b.device_index)));
+        let mut seen_paths = std::collections::HashSet::new();
+        for other in leftover {
+            if seen_paths.insert(other.path.clone()) {
+                out.push(other);
+            }
+            if out.len() >= 2 {
+                break;
+            }
+        }
     }
     out
 }
@@ -490,26 +549,170 @@ pub fn device_rank(usage_page: u16, usage: u16, name: &str) -> u8 {
     tier * 10 + non_vendor
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn infer_kind(usage_page: u16, usage: u16, name: &str) -> LogiDeviceKind {
+/// Known BLE / direct product IDs for desks where the HID product string is empty.
+#[allow(dead_code)]
+fn kind_from_product_id(product_id: u16) -> Option<LogiDeviceKind> {
+    match product_id {
+        // MX MCHNCL M and related BLE / Lightspeed mice
+        0xB36D | 0xB019 | 0xB023 | 0xB034 | 0xB35B | 0xB02A | 0xB025 | 0xB018 => {
+            Some(LogiDeviceKind::Mouse)
+        }
+        // Casa Keys / MX Keys family BLE keyboards
+        0xB371 | 0xB361 | 0xB35F | 0xB45D | 0xB364 | 0xB37A => Some(LogiDeviceKind::Keyboard),
+        // Unifying / Bolt receivers expose paired slots — not a single kind.
+        0xC52B | 0xC532 | 0xC539 | 0xC53A | 0xC53F | 0xC54D | 0xC548 | 0xC547 => None,
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn infer_kind_from_name(name: &str) -> LogiDeviceKind {
     let lower = name.to_ascii_lowercase();
-    if (usage_page == 0x0001 && usage == 0x0002)
-        || [
-            "master", "anywhere", "mouse", "ergo", "mchncl", "vertical", "mx m",
-        ]
-        .iter()
-        .any(|w| lower.contains(w))
+    if [
+        "master", "anywhere", "mouse", "ergo", "mchncl", "vertical", "mx m",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
     {
         return LogiDeviceKind::Mouse;
     }
-    if (usage_page == 0x0001 && usage == 0x0006)
-        || ["keys", "keyboard", "casa"]
-            .iter()
-            .any(|w| lower.contains(w))
+    if ["keys", "keyboard", "casa"]
+        .iter()
+        .any(|w| lower.contains(w))
     {
         return LogiDeviceKind::Keyboard;
     }
     LogiDeviceKind::Other
+}
+
+#[allow(dead_code)]
+fn infer_kind(usage_page: u16, usage: u16, name: &str, product_id: u16) -> LogiDeviceKind {
+    if let Some(kind) = kind_from_product_id(product_id) {
+        return kind;
+    }
+    if usage_page == 0x0001 && usage == 0x0002 {
+        return LogiDeviceKind::Mouse;
+    }
+    if usage_page == 0x0001 && usage == 0x0006 {
+        return LogiDeviceKind::Keyboard;
+    }
+    infer_kind_from_name(name)
+}
+
+/// Print every Logitech hidapi interface and ChangeHost probe result.
+/// Useful on Windows/macOS desks where doctor only reports keyboard coverage.
+pub fn dump_hidpp_discovery() {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        dump_hidpp_discovery_native();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        println!("hid++ discovery dump: unsupported on this OS build (macOS/Windows only)");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dump_hidpp_discovery_native() {
+    use hidapi::HidApi;
+
+    let api = match HidApi::new() {
+        Ok(api) => api,
+        Err(error) => {
+            println!("hid++ dump: failed to init hidapi: {error}");
+            return;
+        }
+    };
+
+    println!("=== Logitech HID interfaces (VID {:04X}) ===", LOGITECH_VID);
+    let mut devices = api
+        .device_list()
+        .filter(|info| info.vendor_id() == LOGITECH_VID)
+        .collect::<Vec<_>>();
+    devices.sort_by_key(|info| (info.product_id(), info.usage_page(), info.usage()));
+
+    if devices.is_empty() {
+        println!("(none)");
+    }
+
+    for info in &devices {
+        let product = info.product_string().unwrap_or("");
+        let path = info.path().to_string_lossy();
+        println!(
+            "pid={:04X} usage_page={:04X} usage={:04X} product={:?} path={}",
+            info.product_id(),
+            info.usage_page(),
+            info.usage(),
+            product,
+            path
+        );
+    }
+
+    println!("=== ChangeHost (0x1814) probes ===");
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut hits = 0usize;
+    for info in &devices {
+        let path_bytes = info.path().to_bytes().to_vec();
+        if !seen_paths.insert(path_bytes) {
+            continue;
+        }
+        let path = info.path().to_string_lossy();
+        let product = info
+            .product_string()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(empty)");
+        let Ok(device) = api.open_path(info.path()) else {
+            println!(
+                "pid={:04X} path={} product={:?}: open failed",
+                info.product_id(),
+                path,
+                product
+            );
+            continue;
+        };
+        let probes = probe_all_change_host(&device);
+        if probes.is_empty() {
+            println!(
+                "pid={:04X} path={} product={:?}: no ChangeHost",
+                info.product_id(),
+                path,
+                product
+            );
+            continue;
+        }
+        for (dev_idx, report_id, feat_idx) in probes {
+            let (host_count, current_host) =
+                read_host_info(&device, report_id, dev_idx, feat_idx).unwrap_or((0, 0));
+            let kind = infer_kind(
+                info.usage_page(),
+                info.usage(),
+                product,
+                info.product_id(),
+            );
+            println!(
+                "pid={:04X} path={} product={:?} kind={:?} dev_idx={} report_id=0x{:02X} feat_idx={} host_count={} current_host={}",
+                info.product_id(),
+                path,
+                product,
+                kind,
+                dev_idx,
+                report_id,
+                feat_idx,
+                host_count,
+                current_host
+            );
+            hits += 1;
+        }
+    }
+    println!("=== summary: {hits} ChangeHost hit(s) ===");
+    let discovery = discover_change_host_devices();
+    println!("deduped targets: {}", discovery.status_note);
+    for target in &discovery.targets {
+        println!(
+            "  {:?} pid={:04X} name={} dev_idx={} hosts={}",
+            target.kind, target.product_id, target.name, target.device_index, target.host_count
+        );
+    }
 }
 
 #[cfg(test)]
@@ -587,5 +790,103 @@ mod tests {
         assign_kinds_for_receiver_slots(&mut targets);
         assert_eq!(targets[0].kind, LogiDeviceKind::Keyboard);
         assert_eq!(targets[1].kind, LogiDeviceKind::Mouse);
+    }
+
+    #[test]
+    fn infer_kind_maps_known_product_ids() {
+        assert_eq!(
+            infer_kind(0xFF00, 0x0001, "", 0xB36D),
+            LogiDeviceKind::Mouse
+        );
+        assert_eq!(
+            infer_kind(0xFF00, 0x0001, "", 0xB371),
+            LogiDeviceKind::Keyboard
+        );
+        // Receiver PID alone is not a device kind.
+        assert_eq!(
+            infer_kind(0xFF00, 0x0001, "USB Receiver", 0xC52B),
+            LogiDeviceKind::Other
+        );
+        // Name still wins for unknown PIDs.
+        assert_eq!(
+            infer_kind(0xFF00, 0x0001, "MX MCHNCL Mouse", 0x0000),
+            LogiDeviceKind::Mouse
+        );
+        assert_eq!(
+            infer_kind(0xFF00, 0x0001, "Casa Keys", 0x0000),
+            LogiDeviceKind::Keyboard
+        );
+    }
+
+    #[test]
+    fn dedupe_keeps_mouse_other_when_keyboard_present() {
+        let targets = vec![
+            HidppTarget {
+                path: b"kbd-ble".to_vec(),
+                name: "Casa Keys#255".to_owned(),
+                kind: LogiDeviceKind::Keyboard,
+                product_id: 0xB371,
+                device_index: 0xFF,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 1,
+            },
+            HidppTarget {
+                path: b"mouse-ble".to_vec(),
+                // Empty / generic name — historically classified Other and dropped.
+                name: "Logitech b36d#255".to_owned(),
+                kind: LogiDeviceKind::Other,
+                product_id: 0xB36D,
+                device_index: 0xFF,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 1,
+            },
+        ];
+        let kept = dedupe_by_kind(targets);
+        assert_eq!(kept.len(), 2, "expected keyboard + promoted mouse, got {kept:?}");
+        assert!(
+            kept.iter().any(|t| t.kind == LogiDeviceKind::Keyboard),
+            "missing keyboard: {kept:?}"
+        );
+        assert!(
+            kept.iter().any(|t| t.kind == LogiDeviceKind::Mouse && t.product_id == 0xB36D),
+            "mouse Other with PID B36D must be kept: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn dedupe_assigns_other_pair_on_distinct_paths() {
+        let targets = vec![
+            HidppTarget {
+                path: b"path-a".to_vec(),
+                name: "Logitech#255".to_owned(),
+                kind: LogiDeviceKind::Other,
+                product_id: 0x1111,
+                device_index: 0xFF,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 0,
+            },
+            HidppTarget {
+                path: b"path-b".to_vec(),
+                name: "Logitech#255".to_owned(),
+                kind: LogiDeviceKind::Other,
+                product_id: 0x2222,
+                device_index: 0xFF,
+                report_id: REPORT_SHORT,
+                feature_index: 0x0D,
+                host_count: 3,
+                current_host: 0,
+            },
+        ];
+        let kept = dedupe_by_kind(targets);
+        assert_eq!(kept.len(), 2);
+        let kinds: Vec<_> = kept.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&LogiDeviceKind::Mouse));
+        assert!(kinds.contains(&LogiDeviceKind::Keyboard));
     }
 }
